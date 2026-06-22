@@ -1,0 +1,1379 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EventTickets — Gestión de Entradas</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #0B0E1A;
+    --surface: #141A2E;
+    --surface-2: #1C2340;
+    --line: #2A3158;
+    --accent: #E8B84B;
+    --accent-dim: #6B5824;
+    --violet: #8B6BD8;
+    --text: #F2F0E8;
+    --text-dim: #8C93B8;
+    --danger: #E5484D;
+    --success: #3DD68C;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:'Inter',sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .font-display{ font-family:'Bebas Neue',sans-serif; letter-spacing:0.04em; }
+  .font-mono{ font-family:'JetBrains Mono',monospace; }
+
+  /* ---- Motivo firma: borde perforado de boleto ---- */
+  .perforated{
+    position:relative;
+  }
+  .perforated::after{
+    content:"";
+    position:absolute; left:0; right:0; bottom:0; height:1px;
+    background-image: radial-gradient(circle, var(--bg) 2px, transparent 2.5px);
+    background-size: 10px 10px;
+    background-position: 0 -4px;
+  }
+  .ticket-stub{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:10px;
+    position:relative;
+    overflow:hidden;
+  }
+  .ticket-stub::before{
+    content:"";
+    position:absolute; top:0; bottom:0; left:72%;
+    width:0; border-left:2px dashed var(--line);
+  }
+  .ticket-stub .stub-notch{
+    position:absolute; left:calc(72% - 7px); width:14px; height:14px; border-radius:50%;
+    background:var(--bg); border:1px solid var(--line);
+  }
+  .ticket-stub .stub-notch.top{ top:-7px; }
+  .ticket-stub .stub-notch.bottom{ bottom:-7px; }
+
+  .scrollbar-thin::-webkit-scrollbar{ width:6px; height:6px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb{ background:var(--line); border-radius:4px; }
+  .scrollbar-thin::-webkit-scrollbar-track{ background:transparent; }
+
+  .nav-item{
+    border-left:3px solid transparent;
+    transition: background .15s, border-color .15s, color .15s;
+  }
+  .nav-item.active{
+    border-left-color:var(--accent);
+    background:var(--surface-2);
+    color:var(--accent);
+  }
+  .nav-item:hover:not(.active){ background:var(--surface); }
+  .nav-item.disabled{ opacity:.4; cursor:not-allowed; }
+
+  input[type="text"], input[type="number"], select, textarea{
+    background:var(--surface-2); border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:.55rem .75rem; width:100%; outline:none;
+    font-family:'Inter',sans-serif;
+  }
+  input:focus, select:focus, textarea:focus{ border-color:var(--accent); }
+  input[type="text"].font-mono, input[type="number"].font-mono{ font-family:'JetBrains Mono',monospace; }
+
+  .btn{ border-radius:8px; padding:.6rem 1.1rem; font-weight:600; font-size:.875rem; transition:filter .15s, transform .1s; }
+  .btn:active{ transform:scale(.98); }
+  .btn-accent{ background:var(--accent); color:#1A1306; }
+  .btn-accent:hover{ filter:brightness(1.08); }
+  .btn-ghost{ background:var(--surface-2); color:var(--text); border:1px solid var(--line); }
+  .btn-ghost:hover{ background:var(--line); }
+  .btn-danger{ background:var(--danger); color:#fff; }
+  .btn-danger:hover{ filter:brightness(1.1); }
+
+  .modal-backdrop{ background:rgba(5,7,14,.72); backdrop-filter:blur(2px); }
+  .toast{ animation: slidein .2s ease-out; }
+  @keyframes slidein{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:translateY(0); } }
+
+  .step-dot{ width:8px; height:8px; border-radius:50%; background:var(--line); }
+  .step-dot.active{ background:var(--accent); width:22px; border-radius:4px; }
+  .step-dot.done{ background:var(--success); }
+
+  .badge{ font-size:.7rem; font-weight:600; padding:.15rem .5rem; border-radius:99px; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<!-- ========== INICIO: SHELL APP ========== -->
+<div id="app" class="hidden min-h-screen">
+  <div class="flex">
+    <!-- Sidebar desktop -->
+    <aside class="hidden md:flex md:flex-col w-60 min-h-screen border-r" style="border-color:var(--line); background:var(--surface);">
+      <div class="p-5 perforated">
+        <div class="font-display text-2xl text-[var(--accent)]" id="sidebarEventName">EVENTTICKETS</div>
+        <div class="text-xs text-[var(--text-dim)] mt-1">Control de entradas</div>
+      </div>
+      <nav class="flex-1 py-3" id="sidebarNav"></nav>
+      <div class="p-4 text-[10px] text-[var(--text-dim)] border-t" style="border-color:var(--line);">v1.0 · Sprint S4</div>
+    </aside>
+
+    <!-- Mobile topbar -->
+    <header class="md:hidden fixed top-0 left-0 right-0 z-30 flex items-center justify-between px-4 py-3 border-b" style="background:var(--surface); border-color:var(--line);">
+      <button id="mobileMenuBtn" class="btn-ghost btn px-3 py-2">☰</button>
+      <div class="font-display text-lg text-[var(--accent)]" id="mobileEventName">EVENTTICKETS</div>
+      <div class="w-10"></div>
+    </header>
+
+    <!-- Mobile slide-in -->
+    <div id="mobileNavOverlay" class="hidden fixed inset-0 z-40 modal-backdrop">
+      <div class="w-64 h-full p-4 flex flex-col" style="background:var(--surface);">
+        <div class="flex justify-between items-center mb-4">
+          <div class="font-display text-xl text-[var(--accent)]">MENÚ</div>
+          <button id="mobileMenuClose" class="text-[var(--text-dim)] text-2xl leading-none">&times;</button>
+        </div>
+        <nav class="flex-1" id="sidebarNavMobile"></nav>
+      </div>
+    </div>
+
+    <!-- Main content -->
+    <main class="flex-1 min-h-screen md:pt-0 pt-14">
+      <div class="max-w-5xl mx-auto p-4 md:p-8" id="mainContent"></div>
+    </main>
+  </div>
+</div>
+<!-- ========== FIN: SHELL APP ========== -->
+
+<!-- ========== INICIO: WIZARD CONFIGURACIÓN INICIAL ========== -->
+<div id="wizardOverlay" class="hidden min-h-screen flex items-center justify-center p-4">
+  <div class="w-full max-w-2xl">
+    <div class="text-center mb-8">
+      <div class="font-display text-5xl text-[var(--accent)] tracking-widest">EVENTTICKETS</div>
+      <div class="text-[var(--text-dim)] text-sm mt-2">Configuremos tu evento antes de empezar a vender</div>
+    </div>
+
+    <div class="flex justify-center gap-2 mb-8">
+      <div class="step-dot" data-step-dot="1"></div>
+      <div class="step-dot" data-step-dot="2"></div>
+      <div class="step-dot" data-step-dot="3"></div>
+    </div>
+
+    <div class="ticket-stub p-6 md:p-8">
+      <!-- Paso 1 -->
+      <div id="wizardStep1">
+        <h2 class="font-display text-2xl mb-1">PASO 1 · EL EVENTO</h2>
+        <p class="text-sm text-[var(--text-dim)] mb-5">Nombre del evento y moneda en la que vas a cobrar.</p>
+        <label class="text-xs text-[var(--text-dim)] block mb-1">Nombre del evento</label>
+        <input type="text" id="wizEventName" placeholder="Ej: Noche de Verano 2026" class="mb-4">
+        <label class="text-xs text-[var(--text-dim)] block mb-1">Símbolo de moneda</label>
+        <input type="text" id="wizCurrency" placeholder="$ , USD, CUP..." maxlength="6" class="mb-2" value="$">
+        <div class="flex justify-end mt-6">
+          <button class="btn btn-accent" data-wizard-next="1">Siguiente →</button>
+        </div>
+      </div>
+
+      <!-- Paso 2 -->
+      <div id="wizardStep2" class="hidden">
+        <h2 class="font-display text-2xl mb-1">PASO 2 · TIPOS DE TICKET</h2>
+        <p class="text-sm text-[var(--text-dim)] mb-5">Define al menos un tipo de ticket. Puedes agregar más adelante desde Ajustes.</p>
+        <div id="wizTicketList" class="space-y-2 mb-3 max-h-72 overflow-y-auto scrollbar-thin pr-1"></div>
+        <button id="wizAddTicketRow" class="btn btn-ghost w-full text-sm">+ Añadir tipo de ticket</button>
+        <div class="flex justify-between mt-6">
+          <button class="btn btn-ghost" data-wizard-back="2">← Atrás</button>
+          <button class="btn btn-accent" data-wizard-next="2">Siguiente →</button>
+        </div>
+      </div>
+
+      <!-- Paso 3 -->
+      <div id="wizardStep3" class="hidden">
+        <h2 class="font-display text-2xl mb-1">PASO 3 · CONFIRMAR</h2>
+        <p class="text-sm text-[var(--text-dim)] mb-5">Revisa antes de comenzar. Podrás editar todo después desde Ajustes.</p>
+        <div id="wizSummary" class="space-y-3 mb-3 max-h-72 overflow-y-auto scrollbar-thin pr-1"></div>
+        <div class="flex justify-between mt-6">
+          <button class="btn btn-ghost" data-wizard-back="3">← Atrás</button>
+          <button id="wizFinish" class="btn btn-accent">🎟️ Comenzar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- ========== FIN: WIZARD CONFIGURACIÓN INICIAL ========== -->
+
+<!-- ========== INICIO: TOAST / APP MODAL ========== -->
+<div id="toastContainer" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-xs"></div>
+
+<div id="appModalOverlay" class="hidden fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4">
+  <div class="ticket-stub p-6 w-full max-w-sm">
+    <div id="appModalIcon" class="text-3xl mb-2"></div>
+    <h3 id="appModalTitle" class="font-display text-xl mb-2"></h3>
+    <p id="appModalMessage" class="text-sm text-[var(--text-dim)] mb-6"></p>
+    <div id="appModalButtons" class="flex justify-end gap-2"></div>
+  </div>
+</div>
+
+<!-- Modal genérico (formularios) -->
+<div id="formModalOverlay" class="hidden fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4 overflow-y-auto">
+  <div class="ticket-stub p-6 w-full max-w-md my-8" id="formModalBox"></div>
+</div>
+<!-- ========== FIN: TOAST / APP MODAL ========== -->
+
+<script>
+// ========== INICIO: CONFIGURACIÓN Y CONSTANTES ==========
+const DB_NAME = 'EventTicketsDB';
+const DB_VERSION = 1;
+let db = null;
+let eventCfg = null; // cache del registro eventConfig
+let currentSection = 'compras';
+const UNIQUE_CI = false; // true: bloquea carnets duplicados activos; false: permite múltiples compras por carnet.
+
+const SECTIONS = [
+  { key:'compras',   label:'Compras',            icon:'🎫', ready:true },
+  { key:'entrada',   label:'Entrada al Evento',  icon:'🚪', ready:true },
+  { key:'fiesta',    label:'Dentro de la Fiesta',icon:'🎉', ready:true },
+  { key:'analisis',  label:'Análisis',           icon:'📊', ready:true },
+  { key:'ajustes',   label:'Ajustes',            icon:'⚙️', ready:true },
+  { key:'backup',    label:'Backup',             icon:'💾', ready:false }, // S5: backup/restauración/exportación JSON
+];
+// ========== FIN: CONFIGURACIÓN Y CONSTANTES ==========
+
+// ========== INICIO: BASE DE DATOS ==========
+function openDatabase(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e)=>{
+      const _db = e.target.result;
+      if(!_db.objectStoreNames.contains('eventConfig')){
+        _db.createObjectStore('eventConfig', { keyPath:'id' });
+      }
+      if(!_db.objectStoreNames.contains('ticketTypes')){
+        const ts = _db.createObjectStore('ticketTypes', { keyPath:'id', autoIncrement:true });
+        ts.createIndex('isActive', 'isActive', { unique:false });
+      }
+      if(!_db.objectStoreNames.contains('purchases')){
+        const ps = _db.createObjectStore('purchases', { keyPath:'id', autoIncrement:true });
+        ps.createIndex('ci', 'ci', { unique:false });
+        ps.createIndex('status', 'status', { unique:false });
+        ps.createIndex('createdAt', 'createdAt', { unique:false });
+      }
+    };
+    req.onsuccess = (e)=> resolve(e.target.result);
+    req.onerror = (e)=> reject(e.target.error);
+  });
+}
+
+function tx(storeNames, mode='readonly'){
+  return db.transaction(storeNames, mode);
+}
+
+function getAll(storeName){
+  return new Promise((resolve, reject)=>{
+    const req = tx(storeName).objectStore(storeName).getAll();
+    req.onsuccess = ()=> resolve(req.result || []);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+
+function getById(storeName, id){
+  return new Promise((resolve, reject)=>{
+    const req = tx(storeName).objectStore(storeName).get(id);
+    req.onsuccess = ()=> resolve(req.result || null);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+
+function putRecord(storeName, record){
+  return new Promise((resolve, reject)=>{
+    const t = tx(storeName, 'readwrite');
+    const req = t.objectStore(storeName).put(record);
+    req.onsuccess = ()=> resolve(req.result);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+
+function deleteRecord(storeName, id){
+  return new Promise((resolve, reject)=>{
+    const t = tx(storeName, 'readwrite');
+    const req = t.objectStore(storeName).delete(id);
+    req.onsuccess = ()=> resolve(true);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+
+async function loadEventConfig(){
+  const cfg = await getById('eventConfig', 1);
+  eventCfg = cfg || { id:1, eventName:'Mi Evento', currencySymbol:'$', setupCompleted:false };
+}
+// ========== FIN: BASE DE DATOS ==========
+
+// ========== INICIO: UTILIDADES ==========
+function escHtml(str){
+  return String(str==null?'':str)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function roundMoney(v){
+  return Math.round((Number(v||0) + Number.EPSILON) * 100) / 100;
+}
+
+function formatCurrency(v){
+  const sym = (eventCfg && eventCfg.currencySymbol) ? eventCfg.currencySymbol : '$';
+  return `${sym} ${roundMoney(v).toFixed(2)}`;
+}
+
+function uid(){
+  return Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+}
+
+function formatDateTime(ts){
+  if(!ts) return '—';
+  return new Date(ts).toLocaleString('es', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+}
+
+function percent(part, total){
+  return total > 0 ? Math.round((part / total) * 1000) / 10 : 0;
+}
+
+function showToast(message, type='info', title=''){
+  const colors = {
+    success: 'var(--success)', error: 'var(--danger)',
+    warning: 'var(--accent)', info: 'var(--violet)'
+  };
+  const icons = { success:'✅', error:'⛔', warning:'⚠️', info:'ℹ️' };
+  const el = document.createElement('div');
+  el.className = 'toast ticket-stub px-4 py-3 text-sm';
+  el.style.borderLeft = `3px solid ${colors[type]||colors.info}`;
+  el.innerHTML = `
+    <div class="flex gap-2 items-start">
+      <span>${icons[type]||icons.info}</span>
+      <div>
+        ${title ? `<div class="font-semibold mb-0.5">${escHtml(title)}</div>` : ''}
+        <div class="text-[var(--text-dim)]">${escHtml(message)}</div>
+      </div>
+    </div>`;
+  document.getElementById('toastContainer').appendChild(el);
+  setTimeout(()=>{ el.style.opacity='0'; el.style.transition='opacity .3s'; setTimeout(()=>el.remove(), 300); }, 3200);
+}
+
+function appAlert(message, type='warning', title='Atención'){
+  return new Promise((resolve)=>{
+    const icons = { warning:'⚠️', error:'⛔', success:'✅', info:'ℹ️' };
+    document.getElementById('appModalIcon').textContent = icons[type] || icons.warning;
+    document.getElementById('appModalTitle').textContent = title;
+    document.getElementById('appModalMessage').textContent = message;
+    const btnWrap = document.getElementById('appModalButtons');
+    btnWrap.innerHTML = '';
+    const okBtn = document.createElement('button');
+    okBtn.className = 'btn btn-accent';
+    okBtn.textContent = 'Entendido';
+    okBtn.onclick = ()=>{ hideAppModal(); resolve(true); };
+    btnWrap.appendChild(okBtn);
+    showAppModal();
+  });
+}
+
+function appConfirm(message, type='warning', title='Confirmar', okText='Confirmar', cancelText='Cancelar', okStyle='primary'){
+  return new Promise((resolve)=>{
+    const icons = { warning:'⚠️', error:'⛔', success:'✅', info:'ℹ️' };
+    document.getElementById('appModalIcon').textContent = icons[type] || icons.warning;
+    document.getElementById('appModalTitle').textContent = title;
+    document.getElementById('appModalMessage').textContent = message;
+    const btnWrap = document.getElementById('appModalButtons');
+    btnWrap.innerHTML = '';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-ghost';
+    cancelBtn.textContent = cancelText;
+    cancelBtn.onclick = ()=>{ hideAppModal(); resolve(false); };
+    const okBtn = document.createElement('button');
+    okBtn.className = okStyle === 'danger' ? 'btn btn-danger' : 'btn btn-accent';
+    okBtn.textContent = okText;
+    okBtn.onclick = ()=>{ hideAppModal(); resolve(true); };
+    btnWrap.appendChild(cancelBtn);
+    btnWrap.appendChild(okBtn);
+    showAppModal();
+  });
+}
+
+function showAppModal(){ document.getElementById('appModalOverlay').classList.remove('hidden'); }
+function hideAppModal(){ document.getElementById('appModalOverlay').classList.add('hidden'); }
+
+function showFormModal(html, widthClass='max-w-md'){
+  const box = document.getElementById('formModalBox');
+  box.className = `ticket-stub p-6 w-full ${widthClass} my-8`;
+  box.innerHTML = html;
+  document.getElementById('formModalOverlay').classList.remove('hidden');
+}
+function hideFormModal(){
+  document.getElementById('formModalOverlay').classList.add('hidden');
+  document.getElementById('formModalBox').innerHTML = '';
+}
+// ========== FIN: UTILIDADES ==========
+
+// ========== INICIO: UI: SIDEBAR Y NAVEGACIÓN ==========
+function renderSidebar(){
+  const navHtml = SECTIONS.map(s=>`
+    <button class="nav-item w-full text-left px-5 py-3 flex items-center gap-3 text-sm ${s.key===currentSection?'active':''} ${!s.ready?'disabled':''}"
+            data-nav="${s.key}" ${!s.ready?'disabled':''}>
+      <span>${s.icon}</span>
+      <span class="flex-1">${s.label}</span>
+      ${!s.ready ? '<span class="badge" style="background:var(--surface-2); color:var(--text-dim);">pronto</span>' : ''}
+    </button>
+  `).join('');
+  document.getElementById('sidebarNav').innerHTML = navHtml;
+  document.getElementById('sidebarNavMobile').innerHTML = navHtml;
+  document.querySelectorAll('[data-nav]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      if(btn.disabled) return;
+      navigateTo(btn.dataset.nav);
+      closeMobileNav();
+    });
+  });
+  const nameTxt = (eventCfg?.eventName || 'EventTickets').toUpperCase();
+  document.getElementById('sidebarEventName').textContent = nameTxt;
+  document.getElementById('mobileEventName').textContent = nameTxt;
+}
+
+function navigateTo(sectionKey){
+  currentSection = sectionKey;
+  renderSidebar();
+  renderSection(sectionKey);
+}
+
+function openMobileNav(){ document.getElementById('mobileNavOverlay').classList.remove('hidden'); }
+function closeMobileNav(){ document.getElementById('mobileNavOverlay').classList.add('hidden'); }
+
+function renderSection(key){
+  const section = SECTIONS.find(s=>s.key===key);
+  const main = document.getElementById('mainContent');
+  if(!section.ready){
+    main.innerHTML = `
+      <div class="ticket-stub p-10 text-center mt-10">
+        <div class="text-4xl mb-3">${section.icon}</div>
+        <h2 class="font-display text-2xl mb-2">${section.label.toUpperCase()}</h2>
+        <p class="text-[var(--text-dim)] text-sm">Este módulo llega en un próximo sprint.</p>
+      </div>`;
+    return;
+  }
+  if(key === 'ajustes') renderAjustes();
+  if(key === 'compras') renderCompras();
+  if(key === 'entrada') renderEntrada();
+  if(key === 'fiesta') renderFiesta();
+  if(key === 'analisis') renderAnalisis();
+}
+// ========== FIN: UI: SIDEBAR Y NAVEGACIÓN ==========
+
+// ========== INICIO: UI: AJUSTES ==========
+async function renderAjustes(){
+  const main = document.getElementById('mainContent');
+  const ticketTypes = await getAll('ticketTypes');
+  ticketTypes.sort((a,b)=> a.id - b.id);
+
+  main.innerHTML = `
+    <h1 class="font-display text-3xl mb-6">AJUSTES</h1>
+
+    <div class="ticket-stub p-5 mb-6">
+      <h2 class="font-display text-lg mb-4 text-[var(--accent)]">DATOS DEL EVENTO</h2>
+      <div class="grid md:grid-cols-2 gap-4 mb-4">
+        <div>
+          <label class="text-xs text-[var(--text-dim)] block mb-1">Nombre del evento</label>
+          <input type="text" id="cfgEventName" value="${escHtml(eventCfg.eventName)}">
+        </div>
+        <div>
+          <label class="text-xs text-[var(--text-dim)] block mb-1">Símbolo de moneda</label>
+          <input type="text" id="cfgCurrency" value="${escHtml(eventCfg.currencySymbol)}" maxlength="6">
+        </div>
+      </div>
+      <button id="btnSaveEventCfg" class="btn btn-accent">Guardar cambios</button>
+    </div>
+
+    <div class="ticket-stub p-5">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="font-display text-lg text-[var(--accent)]">TIPOS DE TICKET</h2>
+        <button id="btnAddTicketType" class="btn btn-accent text-sm">+ Nuevo tipo</button>
+      </div>
+      <div id="ticketTypesList" class="space-y-2"></div>
+    </div>
+  `;
+
+  renderTicketTypesList(ticketTypes);
+
+  document.getElementById('btnSaveEventCfg').addEventListener('click', saveEventConfigFromAjustes);
+  document.getElementById('btnAddTicketType').addEventListener('click', ()=> openTicketTypeForm(null));
+}
+
+function renderTicketTypesList(ticketTypes){
+  const wrap = document.getElementById('ticketTypesList');
+  if(!ticketTypes.length){
+    wrap.innerHTML = `<p class="text-sm text-[var(--text-dim)] py-6 text-center">No hay tipos de ticket todavía.</p>`;
+    return;
+  }
+  wrap.innerHTML = ticketTypes.map(t=>`
+    <div class="flex items-center justify-between gap-3 px-4 py-3 rounded-lg" style="background:var(--surface-2); border:1px solid var(--line); ${t.isActive?'':'opacity:.5;'}">
+      <div class="min-w-0">
+        <div class="font-semibold flex items-center gap-2">
+          ${escHtml(t.name)}
+          ${!t.isActive ? '<span class="badge" style="background:var(--danger); color:#fff;">inactivo</span>' : ''}
+        </div>
+        <div class="text-xs text-[var(--text-dim)]">${escHtml(t.category || 'Sin categoría')}</div>
+      </div>
+      <div class="flex items-center gap-3 shrink-0">
+        <div class="font-mono text-[var(--accent)] font-semibold">${formatCurrency(t.price)}</div>
+        <button class="btn-ghost btn px-2 py-1 text-xs" data-edit-ticket="${t.id}">✏️</button>
+        <button class="btn-ghost btn px-2 py-1 text-xs" data-toggle-ticket="${t.id}">${t.isActive ? '🚫' : '✅'}</button>
+        <button class="btn-ghost btn px-2 py-1 text-xs" data-delete-ticket="${t.id}">🗑️</button>
+      </div>
+    </div>
+  `).join('');
+
+  wrap.querySelectorAll('[data-edit-ticket]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const t = await getById('ticketTypes', Number(btn.dataset.editTicket));
+      openTicketTypeForm(t);
+    });
+  });
+  wrap.querySelectorAll('[data-toggle-ticket]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const t = await getById('ticketTypes', Number(btn.dataset.toggleTicket));
+      t.isActive = !t.isActive;
+      await putRecord('ticketTypes', t);
+      showToast(`${t.name} ${t.isActive ? 'activado' : 'desactivado'}`, 'success');
+      renderAjustes();
+    });
+  });
+  wrap.querySelectorAll('[data-delete-ticket]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const id = Number(btn.dataset.deleteTicket);
+      const usedInPurchases = await isTicketTypeUsed(id);
+      if(usedInPurchases){
+        await appAlert('Este tipo de ticket ya se usó en ventas registradas. Desactívalo en vez de eliminarlo, así conservas el histórico correcto.', 'warning', 'No se puede eliminar');
+        return;
+      }
+      const ok = await appConfirm('Esta acción no se puede deshacer. ¿Eliminar este tipo de ticket?', 'error', 'Eliminar tipo de ticket', 'Eliminar', 'Cancelar', 'danger');
+      if(!ok) return;
+      await deleteRecord('ticketTypes', id);
+      showToast('Tipo de ticket eliminado', 'success');
+      renderAjustes();
+    });
+  });
+}
+
+async function isTicketTypeUsed(ticketTypeId){
+  const purchases = await getAll('purchases');
+  return purchases.some(p => (p.items||[]).some(it => it.ticketTypeId === ticketTypeId));
+}
+
+function openTicketTypeForm(existing){
+  const isEdit = !!existing;
+  showFormModal(`
+    <h3 class="font-display text-xl mb-4">${isEdit ? 'EDITAR' : 'NUEVO'} TIPO DE TICKET</h3>
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Nombre</label>
+    <input type="text" id="ftName" value="${isEdit?escHtml(existing.name):''}" placeholder="Ej: VIP, Estándar, Preventa..." class="mb-3">
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Categoría</label>
+    <input type="text" id="ftCategory" value="${isEdit?escHtml(existing.category||''):''}" placeholder="Ej: General, Promoción..." class="mb-3">
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Precio</label>
+    <input type="number" id="ftPrice" min="0" step="0.01" value="${isEdit?existing.price:''}" placeholder="0.00" class="mb-5">
+    <div class="flex justify-end gap-2">
+      <button class="btn btn-ghost" id="ftCancel">Cancelar</button>
+      <button class="btn btn-accent" id="ftSave">Guardar</button>
+    </div>
+  `);
+  document.getElementById('ftCancel').addEventListener('click', hideFormModal);
+  document.getElementById('ftSave').addEventListener('click', async ()=>{
+    const name = document.getElementById('ftName').value.trim();
+    const category = document.getElementById('ftCategory').value.trim();
+    const price = roundMoney(document.getElementById('ftPrice').value);
+    if(!name){ await appAlert('El nombre del tipo de ticket es obligatorio.'); return; }
+    if(price < 0){ await appAlert('El precio no puede ser negativo.'); return; }
+    const record = isEdit ? { ...existing } : { isActive:true, createdAt: Date.now() };
+    record.name = name;
+    record.category = category;
+    record.price = price;
+    await putRecord('ticketTypes', record);
+    hideFormModal();
+    showToast(`Tipo de ticket ${isEdit?'actualizado':'creado'}`, 'success');
+    renderAjustes();
+  });
+}
+
+async function saveEventConfigFromAjustes(){
+  const name = document.getElementById('cfgEventName').value.trim();
+  const currency = document.getElementById('cfgCurrency').value.trim();
+  if(!name){ await appAlert('El nombre del evento no puede estar vacío.'); return; }
+  eventCfg.eventName = name;
+  eventCfg.currencySymbol = currency || '$';
+  await putRecord('eventConfig', eventCfg);
+  renderSidebar();
+  showToast('Configuración del evento actualizada', 'success');
+}
+// ========== FIN: UI: AJUSTES ==========
+
+// ========== INICIO: UI: COMPRAS ==========
+function purchaseStatusMeta(p){
+  switch(p.status){
+    case 'pending':   return { label:'Pendiente',                          color:'var(--text-dim)', bg:'var(--surface-2)' };
+    case 'partial':   return { label:`Parcial ${p.enteredCount}/${p.totalQuantity}`, color:'#1A1306', bg:'var(--accent)' };
+    case 'complete':  return { label:'Completo',                           color:'#06281A', bg:'var(--success)' };
+    case 'cancelled': return { label:'Anulado',                             color:'#fff',     bg:'var(--danger)' };
+    default:          return { label:p.status,                            color:'var(--text-dim)', bg:'var(--surface-2)' };
+  }
+}
+
+async function renderCompras(){
+  const main = document.getElementById('mainContent');
+  main.innerHTML = `
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-6">
+      <h1 class="font-display text-3xl">COMPRAS</h1>
+      <button id="btnNewPurchase" class="btn btn-accent">+ Nueva compra</button>
+    </div>
+    <div id="purchaseQuickKpis" class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5"></div>
+    <div class="flex flex-col md:flex-row gap-3 mb-5">
+      <input type="text" id="purchaseSearch" placeholder="Buscar por nombre o carnet...">
+      <select id="purchaseStatusFilter" class="md:w-52">
+        <option value="">Todos los estados</option>
+        <option value="pending">Pendiente</option>
+        <option value="partial">Parcial</option>
+        <option value="complete">Completo</option>
+        <option value="cancelled">Anulado</option>
+      </select>
+    </div>
+    <div id="purchasesList" class="space-y-3"></div>
+  `;
+  document.getElementById('btnNewPurchase').addEventListener('click', ()=> openPurchaseForm(null));
+  document.getElementById('purchaseSearch').addEventListener('input', renderPurchasesList);
+  document.getElementById('purchaseStatusFilter').addEventListener('change', renderPurchasesList);
+  await renderPurchasesList();
+}
+
+function renderPurchaseCard(p){
+  const meta = purchaseStatusMeta(p);
+  const itemsHtml = (p.items||[]).map(it=>
+    `<span class="badge" style="background:var(--surface-2); border:1px solid var(--line);">${it.qty}× ${escHtml(it.name)}</span>`
+  ).join(' ');
+  const canEdit = p.status === 'pending';
+  return `
+    <div class="ticket-stub p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 ${p.status==='cancelled'?'opacity-50':''}">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 flex-wrap mb-1.5">
+          <span class="font-semibold">${escHtml(p.buyerName)}</span>
+          <span class="font-mono text-xs text-[var(--text-dim)]">CI ${escHtml(p.ci)}</span>
+          <span class="badge" style="background:${meta.bg}; color:${meta.color};">${meta.label}</span>
+        </div>
+        <div class="flex gap-1.5 flex-wrap mb-1.5">${itemsHtml}</div>
+        <div class="text-xs text-[var(--text-dim)]">${escHtml(p.paymentType)}${p.paymentNote?` · ${escHtml(p.paymentNote)}`:''} · Compra: ${formatDateTime(p.createdAt)}</div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <div class="font-mono text-[var(--accent)] font-semibold">${formatCurrency(p.totalAmount)}</div>
+        ${canEdit ? `<button class="btn-ghost btn px-2 py-1 text-xs" data-edit-purchase="${p.id}">✏️</button>` : ''}
+        ${p.status==='cancelled'
+          ? `<button class="btn-ghost btn px-2 py-1 text-xs" data-reactivate-purchase="${p.id}">↩️</button>`
+          : `<button class="btn-ghost btn px-2 py-1 text-xs" data-cancel-purchase="${p.id}">🚫</button>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderPurchaseQuickKpis(purchases){
+  const active = purchases.filter(p=> p.status !== 'cancelled');
+  const buyers = active.length;
+  const tickets = active.reduce((s,p)=> s + (p.totalQuantity||0), 0);
+  const income = active.reduce((s,p)=> s + (p.totalAmount||0), 0);
+  const wrap = document.getElementById('purchaseQuickKpis');
+  if(!wrap) return;
+  wrap.innerHTML = [
+    ['Compradores', buyers],
+    ['Tickets', tickets],
+    ['Ingresos', formatCurrency(income)]
+  ].map(([label,value])=>`<div class="ticket-stub p-4"><div class="text-xs text-[var(--text-dim)]">${label}</div><div class="font-display text-2xl text-[var(--accent)]">${value}</div></div>`).join('');
+}
+
+async function renderPurchasesList(){
+  const search = (document.getElementById('purchaseSearch')?.value || '').trim().toLowerCase();
+  const statusFilter = document.getElementById('purchaseStatusFilter')?.value || '';
+
+  let purchases = await getAll('purchases');
+  purchases.sort((a,b)=> (b.createdAt||0) - (a.createdAt||0));
+  renderPurchaseQuickKpis(purchases);
+
+  if(statusFilter) purchases = purchases.filter(p=> p.status === statusFilter);
+  if(search){
+    purchases = purchases.filter(p=>
+      (p.buyerName||'').toLowerCase().includes(search) || (p.ci||'').includes(search)
+    );
+  }
+
+  const wrap = document.getElementById('purchasesList');
+  if(!purchases.length){
+    wrap.innerHTML = `<div class="ticket-stub p-10 text-center text-[var(--text-dim)] text-sm">No hay compras que coincidan con el filtro.</div>`;
+    return;
+  }
+  wrap.innerHTML = purchases.map(renderPurchaseCard).join('');
+
+  wrap.querySelectorAll('[data-edit-purchase]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const p = await getById('purchases', Number(btn.dataset.editPurchase));
+      openPurchaseForm(p);
+    });
+  });
+  wrap.querySelectorAll('[data-cancel-purchase]').forEach(btn=>{
+    btn.addEventListener('click', ()=> cancelPurchase(Number(btn.dataset.cancelPurchase)));
+  });
+  wrap.querySelectorAll('[data-reactivate-purchase]').forEach(btn=>{
+    btn.addEventListener('click', ()=> reactivatePurchase(Number(btn.dataset.reactivatePurchase)));
+  });
+}
+
+async function cancelPurchase(id){
+  const p = await getById('purchases', id);
+  if(!p) return;
+  if(p.enteredCount > 0){
+    const ok = await appConfirm(
+      `Esta compra ya registró ${p.enteredCount} entrada(s) al evento. Anularla no revierte esas entradas automáticamente — quedarán contabilizadas en asistencia. ¿Continuar?`,
+      'error', 'Anular compra con entradas registradas', 'Anular de todas formas', 'Cancelar', 'danger'
+    );
+    if(!ok) return;
+  } else {
+    const ok = await appConfirm('¿Anular esta compra? Queda marcada como anulada, no se elimina del historial.', 'warning', 'Anular compra', 'Anular', 'Cancelar', 'danger');
+    if(!ok) return;
+  }
+  p.status = 'cancelled';
+  await putRecord('purchases', p);
+  showToast('Compra anulada', 'success');
+  renderPurchasesList();
+}
+
+async function reactivatePurchase(id){
+  const p = await getById('purchases', id);
+  if(!p) return;
+  p.status = p.enteredCount > 0
+    ? (p.enteredCount >= p.totalQuantity ? 'complete' : 'partial')
+    : 'pending';
+  await putRecord('purchases', p);
+  showToast('Compra reactivada', 'success');
+  renderPurchasesList();
+}
+
+async function openPurchaseForm(existing){
+  const ticketTypes = (await getAll('ticketTypes')).filter(t=>t.isActive).sort((a,b)=> a.id-b.id);
+  if(!ticketTypes.length){
+    await appAlert('No hay tipos de ticket activos. Crea al menos uno desde Ajustes antes de registrar una compra.', 'warning', 'Sin tipos de ticket');
+    return;
+  }
+  const isEdit = !!existing;
+  const draftQty = {};
+  if(isEdit){ (existing.items||[]).forEach(it=> draftQty[it.ticketTypeId] = it.qty); }
+
+  const rowsHtml = ticketTypes.map(t=>`
+    <div class="flex items-center justify-between gap-3 px-3 py-2 rounded-lg" style="background:var(--surface-2); border:1px solid var(--line);">
+      <div class="min-w-0">
+        <div class="font-semibold">${escHtml(t.name)}</div>
+        <div class="text-xs text-[var(--text-dim)]">${escHtml(t.category||'Sin categoría')} · ${formatCurrency(t.price)}</div>
+      </div>
+      <input type="number" min="0" step="1" data-cart-qty="${t.id}" value="${draftQty[t.id]||0}" class="w-20 text-center shrink-0">
+    </div>
+  `).join('');
+
+  showFormModal(`
+    <h3 class="font-display text-xl mb-4">${isEdit?'EDITAR':'NUEVA'} COMPRA</h3>
+
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Tickets</label>
+    <div id="cartRows" class="space-y-2 mb-2 max-h-56 overflow-y-auto scrollbar-thin pr-1">${rowsHtml}</div>
+    <div class="text-right text-sm mb-4" id="cartTotal"></div>
+
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Nombre del comprador</label>
+    <input type="text" id="pBuyerName" value="${isEdit?escHtml(existing.buyerName):''}" placeholder="Nombre y apellidos" class="mb-3">
+
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Carnet de identidad</label>
+    <input type="text" id="pCI" inputmode="numeric" value="${isEdit?escHtml(existing.ci):''}" placeholder="Serie numérica" class="mb-3 font-mono">
+
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Tipo de pago</label>
+    <select id="pPaymentType" class="mb-3">
+      <option value="Efectivo">Efectivo</option>
+      <option value="Transferencia">Transferencia</option>
+      <option value="Otro">Otro</option>
+    </select>
+
+    <div id="pPaymentNoteWrap" class="hidden mb-1">
+      <label class="text-xs text-[var(--text-dim)] block mb-1">Detalle del pago</label>
+      <input type="text" id="pPaymentNote" value="${isEdit?escHtml(existing.paymentNote||''):''}" placeholder="Ej: Zelle, depósito...">
+    </div>
+
+    <div class="flex justify-end gap-2 mt-5">
+      <button class="btn btn-ghost" id="pCancelBtn">Cancelar</button>
+      <button class="btn btn-accent" id="pSaveBtn">${isEdit?'Guardar cambios':'Registrar compra'}</button>
+    </div>
+  `, 'max-w-lg');
+
+  if(isEdit){ document.getElementById('pPaymentType').value = existing.paymentType; }
+
+  function togglePaymentNote(){
+    const v = document.getElementById('pPaymentType').value;
+    document.getElementById('pPaymentNoteWrap').classList.toggle('hidden', v !== 'Otro');
+  }
+  togglePaymentNote();
+  document.getElementById('pPaymentType').addEventListener('change', togglePaymentNote);
+
+  function recalcCartTotal(){
+    let total = 0, qtySum = 0;
+    ticketTypes.forEach(t=>{
+      const input = document.querySelector(`[data-cart-qty="${t.id}"]`);
+      const qty = Math.max(0, parseInt(input.value||0, 10));
+      total += qty * t.price;
+      qtySum += qty;
+    });
+    document.getElementById('cartTotal').innerHTML =
+      `Total: <span class="font-mono text-[var(--accent)] font-semibold">${formatCurrency(total)}</span> · ${qtySum} ticket(s)`;
+  }
+  document.querySelectorAll('[data-cart-qty]').forEach(inp=> inp.addEventListener('input', recalcCartTotal));
+  recalcCartTotal();
+
+  document.getElementById('pCancelBtn').addEventListener('click', hideFormModal);
+  document.getElementById('pSaveBtn').addEventListener('click', async ()=>{
+    const buyerName = document.getElementById('pBuyerName').value.trim();
+    const ci = document.getElementById('pCI').value.trim();
+    const paymentType = document.getElementById('pPaymentType').value;
+    const paymentNoteEl = document.getElementById('pPaymentNote');
+    const paymentNote = paymentNoteEl ? paymentNoteEl.value.trim() : '';
+
+    if(!buyerName){ await appAlert('El nombre del comprador es obligatorio.'); return; }
+    if(!/^\d+$/.test(ci)){ await appAlert('El carnet de identidad debe contener solo números, sin espacios ni guiones.'); return; }
+
+    const items = [];
+    ticketTypes.forEach(t=>{
+      const input = document.querySelector(`[data-cart-qty="${t.id}"]`);
+      const qty = Math.max(0, parseInt(input.value||0, 10));
+      if(qty > 0) items.push({ ticketTypeId:t.id, name:t.name, price:t.price, qty });
+    });
+    if(!items.length){ await appAlert('Selecciona al menos un ticket en el carrito.'); return; }
+
+    const totalQuantity = items.reduce((s,it)=> s+it.qty, 0);
+    const totalAmount = roundMoney(items.reduce((s,it)=> s+(it.qty*it.price), 0));
+
+    const record = isEdit
+      ? { ...existing }
+      : { status:'pending', enteredCount:0, enteredAt:null, createdAt: Date.now() };
+
+    record.buyerName = buyerName;
+    record.ci = ci;
+    record.paymentType = paymentType;
+    record.paymentNote = paymentNote;
+    record.items = items;
+    record.totalQuantity = totalQuantity;
+    record.totalAmount = totalAmount;
+
+    if(UNIQUE_CI){
+      const purchases = await getAll('purchases');
+      const duplicate = purchases.find(p => p.ci === ci && p.status !== 'cancelled' && (!isEdit || p.id !== existing.id));
+      if(duplicate){ await appAlert('Ya existe una compra activa con ese carnet de identidad.', 'warning', 'Carnet duplicado'); return; }
+    }
+
+    await putRecord('purchases', record);
+    hideFormModal();
+    showToast(`Compra ${isEdit?'actualizada':'registrada'} · ${totalQuantity} ticket(s)`, 'success');
+    renderPurchasesList();
+  });
+}
+// ========== FIN: UI: COMPRAS ==========
+
+// ========== INICIO: UI: ENTRADA AL EVENTO ==========
+async function renderEntrada(){
+  const main = document.getElementById('mainContent');
+  main.innerHTML = `
+    <h1 class="font-display text-3xl mb-2">ENTRADA AL EVENTO</h1>
+    <p class="text-sm text-[var(--text-dim)] mb-5">Busca por nombre o carnet de identidad para registrar la entrada.</p>
+    <input type="text" id="entradaSearch" placeholder="Buscar por nombre o carnet..." class="mb-5">
+    <div id="entradaResults" class="space-y-3"></div>
+  `;
+  document.getElementById('entradaSearch').addEventListener('input', renderEntradaResults);
+  document.getElementById('entradaSearch').focus();
+  await renderEntradaResults();
+}
+
+function renderEntradaCard(p){
+  const meta = purchaseStatusMeta(p);
+  const itemsHtml = (p.items||[]).map(it=>
+    `<span class="badge" style="background:var(--surface-2); border:1px solid var(--line);">${it.qty}× ${escHtml(it.name)}</span>`
+  ).join(' ');
+  let actionHtml = '';
+  if(p.status === 'pending'){
+    actionHtml = `<button class="btn btn-accent text-sm" data-checkin="${p.id}">🚪 Dar entrada</button>`;
+  } else if(p.status === 'partial'){
+    actionHtml = `<button class="btn btn-accent text-sm" data-checkin="${p.id}">🔢 Actualizar entrada</button>`;
+  } else if(p.status === 'complete'){
+    actionHtml = `<span class="text-xs text-[var(--success)] font-semibold">✅ Ya está dentro</span>`;
+  }
+  return `
+    <div class="ticket-stub p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 flex-wrap mb-1.5">
+          <span class="font-semibold">${escHtml(p.buyerName)}</span>
+          <span class="font-mono text-xs text-[var(--text-dim)]">CI ${escHtml(p.ci)}</span>
+          <span class="badge" style="background:${meta.bg}; color:${meta.color};">${meta.label}</span>
+        </div>
+        <div class="flex gap-1.5 flex-wrap">${itemsHtml}</div>
+      </div>
+      <div class="shrink-0">${actionHtml}</div>
+    </div>
+  `;
+}
+
+async function renderEntradaResults(){
+  const search = (document.getElementById('entradaSearch')?.value || '').trim().toLowerCase();
+  let purchases = (await getAll('purchases')).filter(p=> p.status !== 'cancelled');
+  purchases.sort((a,b)=> (a.buyerName||'').localeCompare(b.buyerName||''));
+
+  if(search){
+    purchases = purchases.filter(p=>
+      (p.buyerName||'').toLowerCase().includes(search) || (p.ci||'').includes(search)
+    );
+  }
+
+  const wrap = document.getElementById('entradaResults');
+  if(!purchases.length){
+    wrap.innerHTML = `<div class="ticket-stub p-10 text-center text-[var(--text-dim)] text-sm">${search ? 'Sin resultados para esa búsqueda.' : 'No hay compras activas todavía.'}</div>`;
+    return;
+  }
+  wrap.innerHTML = purchases.map(renderEntradaCard).join('');
+  wrap.querySelectorAll('[data-checkin]').forEach(btn=>{
+    btn.addEventListener('click', ()=> openCheckinModal(Number(btn.dataset.checkin)));
+  });
+}
+
+async function markEntry(purchaseId, newCount){
+  const p = await getById('purchases', purchaseId);
+  if(!p) return;
+  p.enteredCount = newCount;
+  p.status = newCount >= p.totalQuantity ? 'complete' : (newCount > 0 ? 'partial' : 'pending');
+  if(newCount > 0 && !p.enteredAt) p.enteredAt = Date.now();
+  if(newCount === 0) p.enteredAt = null;
+  p.lastEntryAt = newCount > 0 ? Date.now() : null;
+  await putRecord('purchases', p);
+  showToast(
+    `${p.buyerName}: ${newCount}/${p.totalQuantity} dentro`,
+    'success',
+    p.status === 'complete' ? 'Grupo completo' : 'Entrada parcial registrada'
+  );
+  if(currentSection === 'entrada') renderEntradaResults();
+  if(currentSection === 'fiesta') renderFiestaList();
+}
+
+async function openCheckinModal(purchaseId){
+  const p = await getById('purchases', purchaseId);
+  if(!p || p.status === 'cancelled'){ await appAlert('Esta compra está anulada y no puede recibir entrada.'); return; }
+  if(p.enteredCount >= p.totalQuantity){
+    await appAlert(`${p.buyerName} ya completó su entrada (${p.totalQuantity}/${p.totalQuantity}).`, 'info', 'Ya está dentro');
+    return;
+  }
+
+  const remaining = p.totalQuantity - p.enteredCount;
+  const itemsHtml = (p.items||[]).map(it=>
+    `<span class="badge" style="background:var(--surface-2); border:1px solid var(--line);">${it.qty}× ${escHtml(it.name)}</span>`
+  ).join(' ');
+
+  // Si solo falta 1 persona, la pregunta "¿completo o parcial?" es redundante: es binaria por definición.
+  const actionHtml = remaining > 1 ? `
+    <p class="text-sm font-semibold mb-2">¿El grupo está completo?</p>
+    <div class="grid grid-cols-2 gap-2">
+      <button id="ciFullBtn" class="btn btn-accent">✅ Sí (${p.totalQuantity})</button>
+      <button id="ciPartialToggle" class="btn btn-ghost">🔢 No, parcial</button>
+    </div>
+    <div id="ciPartialWrap" class="hidden mt-3">
+      <label class="text-xs text-[var(--text-dim)] block mb-1">¿Cuántas personas han entrado en total?</label>
+      <input type="number" id="ciCount" min="${p.enteredCount+1}" max="${p.totalQuantity-1}" value="${p.enteredCount+1}" class="font-mono">
+      <button id="ciPartialConfirm" class="btn btn-accent w-full mt-3">Confirmar entrada parcial</button>
+    </div>
+  ` : `
+    <button id="ciFullBtn" class="btn btn-accent w-full">✅ Entrar (${remaining} persona)</button>
+  `;
+
+  showFormModal(`
+    <h3 class="font-display text-xl mb-1">ENTRADA AL EVENTO</h3>
+    <p class="text-sm text-[var(--text-dim)] mb-3">${escHtml(p.buyerName)} · CI <span class="font-mono">${escHtml(p.ci)}</span></p>
+    <div class="flex gap-1.5 flex-wrap mb-3">${itemsHtml}</div>
+    <p class="text-sm mb-4">Compró <strong>${p.totalQuantity}</strong> · ya registrado: <strong>${p.enteredCount}</strong></p>
+    ${actionHtml}
+    <div class="flex justify-end mt-5">
+      <button class="btn btn-ghost" id="ciCancelBtn">Cerrar</button>
+    </div>
+  `, 'max-w-md');
+
+  document.getElementById('ciCancelBtn').addEventListener('click', hideFormModal);
+  document.getElementById('ciFullBtn').addEventListener('click', async ()=>{
+    await markEntry(p.id, p.totalQuantity);
+    hideFormModal();
+  });
+
+  const toggleBtn = document.getElementById('ciPartialToggle');
+  if(toggleBtn){
+    toggleBtn.addEventListener('click', ()=>{
+      document.getElementById('ciPartialWrap').classList.remove('hidden');
+    });
+    document.getElementById('ciPartialConfirm').addEventListener('click', async ()=>{
+      const val = parseInt(document.getElementById('ciCount').value || 0, 10);
+      if(val <= p.enteredCount){ await appAlert(`Debe ser mayor que lo ya registrado (${p.enteredCount}).`); return; }
+      if(val >= p.totalQuantity){ await appAlert('Si entró el total del grupo, usa el botón "Sí".'); return; }
+      await markEntry(p.id, val);
+      hideFormModal();
+    });
+  }
+}
+// ========== FIN: UI: ENTRADA AL EVENTO ==========
+
+// ========== INICIO: UI: DENTRO DE LA FIESTA ==========
+async function renderFiesta(){
+  const main = document.getElementById('mainContent');
+  main.innerHTML = `
+    <h1 class="font-display text-3xl mb-5">DENTRO DE LA FIESTA</h1>
+    <div id="fiestaStats" class="mb-5"></div>
+    <input type="text" id="fiestaSearch" placeholder="Buscar por nombre o carnet..." class="mb-5">
+    <div id="fiestaList" class="space-y-3"></div>
+  `;
+  document.getElementById('fiestaSearch').addEventListener('input', renderFiestaList);
+  await renderFiestaList();
+}
+
+function renderFiestaCard(p){
+  const meta = purchaseStatusMeta(p);
+  const itemsHtml = (p.items||[]).map(it=>
+    `<span class="badge" style="background:var(--surface-2); border:1px solid var(--line);">${it.qty}× ${escHtml(it.name)}</span>`
+  ).join(' ');
+  const timeStr = p.lastEntryAt ? new Date(p.lastEntryAt).toLocaleTimeString('es', { hour:'2-digit', minute:'2-digit' }) : '';
+  return `
+    <div class="ticket-stub p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 flex-wrap mb-1.5">
+          <span class="font-semibold">${escHtml(p.buyerName)}</span>
+          <span class="font-mono text-xs text-[var(--text-dim)]">CI ${escHtml(p.ci)}</span>
+          <span class="badge" style="background:${meta.bg}; color:${meta.color};">${meta.label}</span>
+        </div>
+        <div class="flex gap-1.5 flex-wrap">${itemsHtml}</div>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        ${timeStr ? `<span class="text-xs text-[var(--text-dim)] font-mono">⏱ ${timeStr}</span>` : ''}
+        <button class="btn-ghost btn px-2 py-1 text-xs" data-correct-entry="${p.id}">✏️ Corregir</button>
+      </div>
+    </div>
+  `;
+}
+
+async function renderFiestaList(){
+  const search = (document.getElementById('fiestaSearch')?.value || '').trim().toLowerCase();
+  const active = (await getAll('purchases')).filter(p=> p.status !== 'cancelled');
+
+  const totalSoldQty = active.reduce((s,p)=> s + (p.totalQuantity||0), 0);
+  const totalEntered = active.reduce((s,p)=> s + (p.enteredCount||0), 0);
+  document.getElementById('fiestaStats').innerHTML = `
+    <div class="ticket-stub p-4 flex items-center justify-between">
+      <div>
+        <div class="text-xs text-[var(--text-dim)]">Asistencia en vivo</div>
+        <div class="font-display text-2xl text-[var(--accent)]">${totalEntered} / ${totalSoldQty}</div>
+      </div>
+      <div class="text-3xl">🎉</div>
+    </div>
+  `;
+
+  let inside = active.filter(p=> (p.enteredCount||0) > 0);
+  inside.sort((a,b)=> (b.lastEntryAt||0) - (a.lastEntryAt||0));
+  if(search){
+    inside = inside.filter(p=>
+      (p.buyerName||'').toLowerCase().includes(search) || (p.ci||'').includes(search)
+    );
+  }
+
+  const wrap = document.getElementById('fiestaList');
+  if(!inside.length){
+    wrap.innerHTML = `<div class="ticket-stub p-10 text-center text-[var(--text-dim)] text-sm">${search ? 'Sin resultados para esa búsqueda.' : 'Todavía no ha entrado nadie.'}</div>`;
+    return;
+  }
+  wrap.innerHTML = inside.map(renderFiestaCard).join('');
+  wrap.querySelectorAll('[data-correct-entry]').forEach(btn=>{
+    btn.addEventListener('click', ()=> openEntryCorrection(Number(btn.dataset.correctEntry)));
+  });
+}
+
+async function openEntryCorrection(purchaseId){
+  const p = await getById('purchases', purchaseId);
+  if(!p) return;
+  showFormModal(`
+    <h3 class="font-display text-xl mb-1">CORREGIR ENTRADA</h3>
+    <p class="text-sm text-[var(--text-dim)] mb-4">${escHtml(p.buyerName)} · compró ${p.totalQuantity}</p>
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Personas dentro (total exacto, no incremento)</label>
+    <input type="number" id="ecCount" min="0" max="${p.totalQuantity}" value="${p.enteredCount}" class="font-mono mb-1">
+    <p class="text-xs text-[var(--text-dim)] mb-4">Pon 0 para revertir a "pendiente" si fue un error.</p>
+    <div class="flex justify-end gap-2">
+      <button class="btn btn-ghost" id="ecCancel">Cancelar</button>
+      <button class="btn btn-accent" id="ecSave">Guardar</button>
+    </div>
+  `, 'max-w-sm');
+
+  document.getElementById('ecCancel').addEventListener('click', hideFormModal);
+  document.getElementById('ecSave').addEventListener('click', async ()=>{
+    const val = parseInt(document.getElementById('ecCount').value || 0, 10);
+    if(val < 0 || val > p.totalQuantity){ await appAlert(`Debe estar entre 0 y ${p.totalQuantity}.`); return; }
+    await markEntry(p.id, val);
+    hideFormModal();
+  });
+}
+// ========== FIN: UI: DENTRO DE LA FIESTA ==========
+
+
+// ========== INICIO: UI: ANÁLISIS ==========
+function emptyTypeMetric(t){
+  return { id:t.id, name:t.name, category:t.category||'Sin categoría', sold:0, income:0, entered:0 };
+}
+
+async function buildAnalyticsData(){
+  const [ticketTypes, allPurchases] = await Promise.all([getAll('ticketTypes'), getAll('purchases')]);
+  const activePurchases = allPurchases.filter(p=> p.status !== 'cancelled');
+  const byType = new Map(ticketTypes.map(t=> [t.id, emptyTypeMetric(t)]));
+  const payment = new Map();
+
+  activePurchases.forEach(p=>{
+    const paymentKey = p.paymentType || 'Sin especificar';
+    if(!payment.has(paymentKey)) payment.set(paymentKey, { method:paymentKey, count:0, amount:0 });
+    const pay = payment.get(paymentKey);
+    pay.count += 1;
+    pay.amount += p.totalAmount || 0;
+
+    (p.items||[]).forEach(it=>{
+      if(!byType.has(it.ticketTypeId)) byType.set(it.ticketTypeId, { id:it.ticketTypeId, name:it.name, category:'Histórico', sold:0, income:0, entered:0 });
+      const row = byType.get(it.ticketTypeId);
+      row.sold += it.qty || 0;
+      row.income += (it.qty||0) * (it.price||0);
+    });
+
+    let remainingEntered = p.enteredCount || 0;
+    (p.items||[]).forEach(it=>{
+      const row = byType.get(it.ticketTypeId);
+      const enteredForItem = Math.min(it.qty||0, remainingEntered);
+      row.entered += enteredForItem;
+      remainingEntered -= enteredForItem;
+    });
+  });
+
+  const totals = {
+    buyers: activePurchases.length,
+    sold: activePurchases.reduce((s,p)=> s + (p.totalQuantity||0), 0),
+    entered: activePurchases.reduce((s,p)=> s + (p.enteredCount||0), 0),
+    income: activePurchases.reduce((s,p)=> s + (p.totalAmount||0), 0)
+  };
+  totals.pending = Math.max(0, totals.sold - totals.entered);
+  totals.attendance = percent(totals.entered, totals.sold);
+
+  return { ticketTypes, allPurchases, activePurchases, byType:[...byType.values()], payment:[...payment.values()], totals };
+}
+
+function analyticsTable(headers, rows, emptyMessage='Sin datos para mostrar.'){
+  if(!rows.length) return `<div class="text-sm text-[var(--text-dim)] py-6 text-center">${emptyMessage}</div>`;
+  return `<div class="overflow-x-auto scrollbar-thin"><table class="w-full text-sm"><thead><tr>${headers.map(h=>`<th class="text-left text-xs text-[var(--text-dim)] font-semibold py-2 pr-4">${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+}
+
+async function renderAnalisis(){
+  const main = document.getElementById('mainContent');
+  const data = await buildAnalyticsData();
+  const typeRows = data.byType.filter(r=>r.sold>0).sort((a,b)=> a.name.localeCompare(b.name));
+  const rankingRows = [...typeRows].sort((a,b)=> b.sold - a.sold || b.income - a.income);
+  const paymentTotal = data.payment.reduce((s,p)=> s+p.amount, 0);
+
+  main.innerHTML = `
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-6">
+      <h1 class="font-display text-3xl">📊 ANÁLISIS</h1>
+      <button id="btnExportExcel" class="btn btn-accent">Exportar Excel</button>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-3 mb-6">
+      ${[
+        ['Compradores registrados', data.totals.buyers], ['Tickets vendidos', data.totals.sold], ['Tickets utilizados', data.totals.entered],
+        ['Tickets pendientes', data.totals.pending], ['Ingresos totales', formatCurrency(data.totals.income)], ['% de asistencia', data.totals.attendance+'%']
+      ].map(([label,value])=>`<div class="ticket-stub p-4"><div class="text-xs text-[var(--text-dim)]">${label}</div><div class="font-display text-2xl text-[var(--accent)]">${value}</div></div>`).join('')}
+    </div>
+    <div class="grid gap-5">
+      <div class="ticket-stub p-5"><h2 class="font-display text-lg mb-3 text-[var(--accent)]">VENTAS POR TIPO</h2>${analyticsTable(['Tipo','Categoría','Cantidad vendida','Ingresos'], typeRows.map(r=>`<tr class="border-t" style="border-color:var(--line);"><td class="py-2 pr-4">${escHtml(r.name)}</td><td class="py-2 pr-4 text-[var(--text-dim)]">${escHtml(r.category)}</td><td class="py-2 pr-4 font-mono">${r.sold}</td><td class="py-2 pr-4 font-mono text-[var(--accent)]">${formatCurrency(r.income)}</td></tr>`))}</div>
+      <div class="ticket-stub p-5"><h2 class="font-display text-lg mb-3 text-[var(--accent)]">ASISTENCIA POR TIPO</h2>${analyticsTable(['Tipo','Vendidos','Ingresaron','No asistieron','%'], typeRows.map(r=>`<tr class="border-t" style="border-color:var(--line);"><td class="py-2 pr-4">${escHtml(r.name)}</td><td class="py-2 pr-4 font-mono">${r.sold}</td><td class="py-2 pr-4 font-mono">${r.entered}</td><td class="py-2 pr-4 font-mono">${Math.max(0,r.sold-r.entered)}</td><td class="py-2 pr-4 font-mono text-[var(--accent)]">${percent(r.entered,r.sold)}%</td></tr>`))}</div>
+      <div class="ticket-stub p-5"><h2 class="font-display text-lg mb-3 text-[var(--accent)]">RANKING DE TICKETS</h2>${analyticsTable(['#','Tipo','Categoría','Vendidos','Ingresos'], rankingRows.map((r,i)=>`<tr class="border-t" style="border-color:var(--line);"><td class="py-2 pr-4 font-mono">${i+1}</td><td class="py-2 pr-4">${escHtml(r.name)}</td><td class="py-2 pr-4 text-[var(--text-dim)]">${escHtml(r.category)}</td><td class="py-2 pr-4 font-mono">${r.sold}</td><td class="py-2 pr-4 font-mono text-[var(--accent)]">${formatCurrency(r.income)}</td></tr>`))}</div>
+      <div class="ticket-stub p-5"><h2 class="font-display text-lg mb-3 text-[var(--accent)]">MÉTODOS DE PAGO</h2>${analyticsTable(['Método','Cantidad','Monto','Porcentaje'], data.payment.sort((a,b)=>b.amount-a.amount).map(r=>`<tr class="border-t" style="border-color:var(--line);"><td class="py-2 pr-4">${escHtml(r.method)}</td><td class="py-2 pr-4 font-mono">${r.count}</td><td class="py-2 pr-4 font-mono text-[var(--accent)]">${formatCurrency(r.amount)}</td><td class="py-2 pr-4 font-mono">${percent(r.amount,paymentTotal)}%</td></tr>`))}</div>
+    </div>
+  `;
+  document.getElementById('btnExportExcel').addEventListener('click', exportExcel);
+}
+
+async function exportExcel(){
+  if(typeof XLSX === 'undefined'){ await appAlert('No se pudo cargar SheetJS. Verifica la conexión para exportar Excel.', 'error', 'Exportación no disponible'); return; }
+  const data = await buildAnalyticsData();
+  const compras = data.allPurchases.map(p=>({ Nombre:p.buyerName||'', Carnet:p.ci||'', 'Método de pago':p.paymentType||'', Cantidad:p.totalQuantity||0, Importe:p.totalAmount||0, Estado:purchaseStatusMeta(p).label, Fecha:formatDateTime(p.createdAt) }));
+  const asistentes = data.allPurchases.filter(p=>p.status !== 'cancelled').map(p=>({ Nombre:p.buyerName||'', Carnet:p.ci||'', Comprados:p.totalQuantity||0, Utilizados:p.enteredCount||0, Estado:purchaseStatusMeta(p).label }));
+  const resumen = data.byType.filter(r=>r.sold>0).map(r=>({ 'Tipo ticket':r.name, Cantidad:r.sold, Ingresos:roundMoney(r.income), Asistencia:percent(r.entered,r.sold)+'%' }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(compras), 'Compras');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(asistentes), 'Asistentes');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumen), 'Resumen');
+  XLSX.writeFile(wb, `EventTickets_${(eventCfg?.eventName||'evento').replace(/[^a-z0-9]+/gi,'_')}_S4.xlsx`);
+  showToast('Archivo Excel generado', 'success', 'Exportación');
+}
+// ========== FIN: UI: ANÁLISIS ==========
+
+// ========== INICIO: ARQUITECTURA S5 BACKUP ==========
+const BackupService = {
+  version: 'S5-ready',
+  stores: ['eventConfig', 'ticketTypes', 'purchases'],
+  // Sprint 5: exportar JSON, restaurar JSON y exportar base de datos completa reutilizando estas stores.
+};
+// ========== FIN: ARQUITECTURA S5 BACKUP ==========
+
+// ========== INICIO: WIZARD CONFIGURACIÓN INICIAL ==========
+let wizardTicketDraft = [];
+
+function renderWizardStepDots(step){
+  for(let i=1;i<=3;i++){
+    const dot = document.querySelector(`[data-step-dot="${i}"]`);
+    dot.classList.remove('active','done');
+    if(i < step) dot.classList.add('done');
+    if(i === step) dot.classList.add('active');
+  }
+}
+
+function showWizardStep(step){
+  ['1','2','3'].forEach(n=> document.getElementById('wizardStep'+n).classList.add('hidden'));
+  document.getElementById('wizardStep'+step).classList.remove('hidden');
+  renderWizardStepDots(Number(step));
+}
+
+function renderWizTicketRows(){
+  const wrap = document.getElementById('wizTicketList');
+  if(!wizardTicketDraft.length){
+    wrap.innerHTML = `<p class="text-sm text-[var(--text-dim)] text-center py-4">Añade al menos un tipo de ticket para continuar.</p>`;
+    return;
+  }
+  wrap.innerHTML = wizardTicketDraft.map((row, idx)=>`
+    <div class="flex gap-2 items-start" data-wiz-row="${idx}">
+      <input type="text" placeholder="Nombre (ej: VIP)" value="${escHtml(row.name)}" data-wiz-field="name" class="flex-[1.4]">
+      <input type="text" placeholder="Categoría" value="${escHtml(row.category)}" data-wiz-field="category" class="flex-1">
+      <input type="number" placeholder="Precio" min="0" step="0.01" value="${row.price}" data-wiz-field="price" class="flex-1">
+      <button class="btn-ghost btn px-2 text-xs" data-wiz-remove="${idx}">🗑️</button>
+    </div>
+  `).join('');
+
+  wrap.querySelectorAll('[data-wiz-row]').forEach(rowEl=>{
+    const idx = Number(rowEl.dataset.wizRow);
+    rowEl.querySelectorAll('[data-wiz-field]').forEach(input=>{
+      input.addEventListener('input', ()=>{
+        const field = input.dataset.wizField;
+        wizardTicketDraft[idx][field] = field === 'price' ? Number(input.value||0) : input.value;
+      });
+    });
+  });
+  wrap.querySelectorAll('[data-wiz-remove]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      wizardTicketDraft.splice(Number(btn.dataset.wizRemove), 1);
+      renderWizTicketRows();
+    });
+  });
+}
+
+function renderWizSummary(){
+  const wrap = document.getElementById('wizSummary');
+  const name = document.getElementById('wizEventName').value.trim();
+  const currency = document.getElementById('wizCurrency').value.trim() || '$';
+  wrap.innerHTML = `
+    <div class="px-4 py-3 rounded-lg" style="background:var(--surface-2); border:1px solid var(--line);">
+      <div class="text-xs text-[var(--text-dim)]">Evento</div>
+      <div class="font-semibold">${escHtml(name)}</div>
+      <div class="text-xs text-[var(--text-dim)] mt-1">Moneda: ${escHtml(currency)}</div>
+    </div>
+    ${wizardTicketDraft.map(t=>`
+      <div class="flex justify-between items-center px-4 py-3 rounded-lg" style="background:var(--surface-2); border:1px solid var(--line);">
+        <div>
+          <div class="font-semibold">${escHtml(t.name)}</div>
+          <div class="text-xs text-[var(--text-dim)]">${escHtml(t.category||'Sin categoría')}</div>
+        </div>
+        <div class="font-mono text-[var(--accent)]">${currency} ${roundMoney(t.price).toFixed(2)}</div>
+      </div>
+    `).join('')}
+  `;
+}
+
+function initWizard(){
+  wizardTicketDraft = [{ name:'', category:'', price:0 }];
+  showWizardStep(1);
+  renderWizTicketRows();
+
+  document.getElementById('wizAddTicketRow').addEventListener('click', ()=>{
+    wizardTicketDraft.push({ name:'', category:'', price:0 });
+    renderWizTicketRows();
+  });
+
+  document.querySelector('[data-wizard-next="1"]').addEventListener('click', async ()=>{
+    const name = document.getElementById('wizEventName').value.trim();
+    if(!name){ await appAlert('El nombre del evento es obligatorio.'); return; }
+    showWizardStep(2);
+  });
+
+  document.querySelector('[data-wizard-back="2"]').addEventListener('click', ()=> showWizardStep(1));
+
+  document.querySelector('[data-wizard-next="2"]').addEventListener('click', async ()=>{
+    const valid = wizardTicketDraft.filter(t=> t.name.trim().length > 0);
+    if(!valid.length){ await appAlert('Agrega al menos un tipo de ticket con nombre.'); return; }
+    for(const t of valid){
+      if(t.price < 0){ await appAlert(`El precio de "${t.name}" no puede ser negativo.`); return; }
+    }
+    wizardTicketDraft = valid;
+    renderWizSummary();
+    showWizardStep(3);
+  });
+
+  document.querySelector('[data-wizard-back="3"]').addEventListener('click', ()=> showWizardStep(2));
+
+  document.getElementById('wizFinish').addEventListener('click', async ()=>{
+    const name = document.getElementById('wizEventName').value.trim();
+    const currency = document.getElementById('wizCurrency').value.trim() || '$';
+
+    eventCfg = {
+      id: 1,
+      eventName: name,
+      currencySymbol: currency,
+      setupCompleted: true,
+      createdAt: Date.now()
+    };
+    await putRecord('eventConfig', eventCfg);
+
+    for(const t of wizardTicketDraft){
+      await putRecord('ticketTypes', {
+        name: t.name.trim(),
+        category: t.category.trim(),
+        price: roundMoney(t.price),
+        isActive: true,
+        createdAt: Date.now()
+      });
+    }
+
+    document.getElementById('wizardOverlay').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+    renderSidebar();
+    navigateTo('compras');
+    showToast('Evento configurado correctamente', 'success', '¡Listo!');
+  });
+}
+// ========== FIN: WIZARD CONFIGURACIÓN INICIAL ==========
+
+// ========== INICIO: INICIALIZACIÓN ==========
+async function init(){
+  db = await openDatabase();
+  await loadEventConfig();
+
+  document.getElementById('mobileMenuBtn').addEventListener('click', openMobileNav);
+  document.getElementById('mobileMenuClose').addEventListener('click', closeMobileNav);
+
+  if(!eventCfg.setupCompleted){
+    document.getElementById('wizardOverlay').classList.remove('hidden');
+    initWizard();
+  } else {
+    document.getElementById('app').classList.remove('hidden');
+    renderSidebar();
+    navigateTo('compras');
+  }
+}
+
+window.addEventListener('DOMContentLoaded', init);
+// ========== FIN: INICIALIZACIÓN ==========
+</script>
+</body>
+</html>
