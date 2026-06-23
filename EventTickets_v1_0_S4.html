@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EventTickets — Gestión de Entradas</title>
+<title>El Colao — Control de Entradas</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -83,6 +83,7 @@
     font-family:'Inter',sans-serif;
   }
   input:focus, select:focus, textarea:focus{ border-color:var(--accent); }
+  .qty-input{ width:3.75rem !important; min-width:3.75rem; padding:.4rem .35rem !important; text-align:center; }
   input[type="text"].font-mono, input[type="number"].font-mono{ font-family:'JetBrains Mono',monospace; }
 
   .btn{ border-radius:8px; padding:.6rem 1.1rem; font-weight:600; font-size:.875rem; transition:filter .15s, transform .1s; }
@@ -113,7 +114,7 @@
     <!-- Sidebar desktop -->
     <aside class="hidden md:flex md:flex-col w-60 min-h-screen border-r" style="border-color:var(--line); background:var(--surface);">
       <div class="p-5 perforated">
-        <div class="font-display text-2xl text-[var(--accent)]" id="sidebarEventName">EVENTTICKETS</div>
+        <div class="font-display text-2xl text-[var(--accent)]" id="sidebarEventName">EL COLAO</div>
         <div class="text-xs text-[var(--text-dim)] mt-1">Control de entradas</div>
       </div>
       <nav class="flex-1 py-3" id="sidebarNav"></nav>
@@ -150,8 +151,8 @@
 <div id="wizardOverlay" class="hidden min-h-screen flex items-center justify-center p-4">
   <div class="w-full max-w-2xl">
     <div class="text-center mb-8">
-      <div class="font-display text-5xl text-[var(--accent)] tracking-widest">EVENTTICKETS</div>
-      <div class="text-[var(--text-dim)] text-sm mt-2">Configuremos tu evento antes de empezar a vender</div>
+      <div class="font-display text-5xl text-[var(--accent)] tracking-widest">EL COLAO</div>
+      <div class="text-[var(--text-dim)] text-sm mt-2">Control de entradas — evita que se cuelen</div>
     </div>
 
     <div class="flex justify-center gap-2 mb-8">
@@ -177,9 +178,9 @@
       <!-- Paso 2 -->
       <div id="wizardStep2" class="hidden">
         <h2 class="font-display text-2xl mb-1">PASO 2 · TIPOS DE TICKET</h2>
-        <p class="text-sm text-[var(--text-dim)] mb-5">Define al menos un tipo de ticket. Puedes agregar más adelante desde Ajustes.</p>
+        <p class="text-sm text-[var(--text-dim)] mb-5">Define categorías de ticket y precios. Puedes agregar más detalles después desde Ajustes.</p>
         <div id="wizTicketList" class="space-y-2 mb-3 max-h-72 overflow-y-auto scrollbar-thin pr-1"></div>
-        <button id="wizAddTicketRow" class="btn btn-ghost w-full text-sm">+ Añadir tipo de ticket</button>
+        <button id="wizAddTicketRow" class="btn btn-ghost w-full text-sm">+ Añadir categoría</button>
         <div class="flex justify-between mt-6">
           <button class="btn btn-ghost" data-wizard-back="2">← Atrás</button>
           <button class="btn btn-accent" data-wizard-next="2">Siguiente →</button>
@@ -221,11 +222,14 @@
 
 <script>
 // ========== INICIO: CONFIGURACIÓN Y CONSTANTES ==========
-const DB_NAME = 'EventTicketsDB';
+const DB_NAME = 'ElColaoDB';
 const DB_VERSION = 1;
 let db = null;
 let eventCfg = null; // cache del registro eventConfig
 let currentSection = 'compras';
+const ITEMS_PER_PAGE = 20;
+let purchasesCurrentPage = 1;
+let comprasTotalPages = 1;
 const UNIQUE_CI = false; // true: bloquea carnets duplicados activos; false: permite múltiples compras por carnet.
 
 const SECTIONS = [
@@ -234,7 +238,7 @@ const SECTIONS = [
   { key:'fiesta',    label:'Dentro de la Fiesta',icon:'🎉', ready:true },
   { key:'analisis',  label:'Análisis',           icon:'📊', ready:true },
   { key:'ajustes',   label:'Ajustes',            icon:'⚙️', ready:true },
-  { key:'backup',    label:'Backup',             icon:'💾', ready:false }, // S5: backup/restauración/exportación JSON
+  { key:'backup',    label:'Backup',             icon:'💾', ready:true },
 ];
 // ========== FIN: CONFIGURACIÓN Y CONSTANTES ==========
 
@@ -460,6 +464,7 @@ function renderSection(key){
   if(key === 'entrada') renderEntrada();
   if(key === 'fiesta') renderFiesta();
   if(key === 'analisis') renderAnalisis();
+  if(key === 'backup') renderBackup();
 }
 // ========== FIN: UI: SIDEBAR Y NAVEGACIÓN ==========
 
@@ -494,12 +499,19 @@ async function renderAjustes(){
       </div>
       <div id="ticketTypesList" class="space-y-2"></div>
     </div>
+
+    <div class="ticket-stub p-5 border-l-4 border-[var(--danger)]">
+      <h2 class="font-display text-lg text-[var(--danger)] mb-2">⚠️ ZONA DE RIESGO</h2>
+      <p class="text-sm text-[var(--text-dim)] mb-4">Resetea todo a cero. Se genera automáticamente un backup antes de borrar.</p>
+      <button id="btnResetEventData" class="btn btn-danger w-full">🔄 Resetear evento — borrar todo</button>
+    </div>
   `;
 
   renderTicketTypesList(ticketTypes);
 
   document.getElementById('btnSaveEventCfg').addEventListener('click', saveEventConfigFromAjustes);
   document.getElementById('btnAddTicketType').addEventListener('click', ()=> openTicketTypeForm(null));
+  document.getElementById('btnResetEventData').addEventListener('click', resetEventDataWithBackup);
 }
 
 function renderTicketTypesList(ticketTypes){
@@ -606,6 +618,45 @@ async function saveEventConfigFromAjustes(){
   renderSidebar();
   showToast('Configuración del evento actualizada', 'success');
 }
+
+async function resetEventDataWithBackup(){
+  const ok1 = await appConfirm(
+    'Se creará un backup automático de todos tus datos ANTES de borrar. ¿Continuar?',
+    'warning', 'Paso 1: Crear backup', 'Sí, continuar', 'Cancelar'
+  );
+  if(!ok1) return;
+
+  try {
+    // Crear backup automático
+    const filename = await BackupService.download('pre-reset-backup');
+    
+    // Segunda confirmación para que no sea accidental
+    const ok2 = await appConfirm(
+      `Backup creado: ${filename}\n\nEsta acción eliminará TODOS los datos: evento, tipos de ticket, compras, asistencia. Es irreversible. ¿Realmente deseas continuar?`,
+      'error', 'Confirmar reset total', 'Sí, borrar todo', 'Cancelar', 'danger'
+    );
+    if(!ok2) return;
+
+    // Borrar todas las tiendas
+    const storeNames = ['eventConfig', 'ticketTypes', 'purchases'];
+    for(const store of storeNames){
+      const records = await getAll(store);
+      for(const r of records){
+        await deleteRecord(store, r.id);
+      }
+    }
+    
+    // Reiniciar la aplicación
+    eventCfg = null;
+    currentSection = 'compras';
+    document.getElementById('wizardOverlay').classList.remove('hidden');
+    document.getElementById('app').classList.add('hidden');
+    initWizard();
+    showToast('Base de datos limpiada. Configura un nuevo evento.', 'success', 'Reset completado');
+  } catch(err){
+    await appAlert('Error al resetear: ' + (err.message || 'desconocido'), 'error', 'Reset fallido');
+  }
+}
 // ========== FIN: UI: AJUSTES ==========
 
 // ========== INICIO: UI: COMPRAS ==========
@@ -707,7 +758,28 @@ async function renderPurchasesList(){
     wrap.innerHTML = `<div class="ticket-stub p-10 text-center text-[var(--text-dim)] text-sm">No hay compras que coincidan con el filtro.</div>`;
     return;
   }
-  wrap.innerHTML = purchases.map(renderPurchaseCard).join('');
+
+  // Paginación
+  comprasTotalPages = Math.ceil(purchases.length / ITEMS_PER_PAGE);
+  purchasesCurrentPage = Math.max(1, Math.min(purchasesCurrentPage, comprasTotalPages));
+  const start = (purchasesCurrentPage - 1) * ITEMS_PER_PAGE;
+  const paginated = purchases.slice(start, start + ITEMS_PER_PAGE);
+
+  const html = paginated.map(renderPurchaseCard).join('');
+  const paginationHtml = comprasTotalPages > 1 ? `
+    <div class="flex items-center justify-between mt-6 pt-4 border-t" style="border-color:var(--line);">
+      <div class="text-xs text-[var(--text-dim)]">
+        Mostrando ${start + 1}–${Math.min(start + ITEMS_PER_PAGE, purchases.length)} de ${purchases.length}
+      </div>
+      <div class="flex gap-2">
+        ${purchasesCurrentPage > 1 ? `<button class="btn btn-ghost text-sm" data-page-prev>← Anterior</button>` : ''}
+        <span class="text-xs text-[var(--text-dim)] px-2 py-1.5">Pág ${purchasesCurrentPage}/${comprasTotalPages}</span>
+        ${purchasesCurrentPage < comprasTotalPages ? `<button class="btn btn-ghost text-sm" data-page-next>Siguiente →</button>` : ''}
+      </div>
+    </div>
+  ` : '';
+
+  wrap.innerHTML = html + paginationHtml;
 
   wrap.querySelectorAll('[data-edit-purchase]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
@@ -721,6 +793,12 @@ async function renderPurchasesList(){
   wrap.querySelectorAll('[data-reactivate-purchase]').forEach(btn=>{
     btn.addEventListener('click', ()=> reactivatePurchase(Number(btn.dataset.reactivatePurchase)));
   });
+
+  // Botones de paginación
+  const prevBtn = wrap.querySelector('[data-page-prev]');
+  if(prevBtn) prevBtn.addEventListener('click', ()=>{ purchasesCurrentPage--; renderPurchasesList(); });
+  const nextBtn = wrap.querySelector('[data-page-next]');
+  if(nextBtn) nextBtn.addEventListener('click', ()=>{ purchasesCurrentPage++; renderPurchasesList(); });
 }
 
 async function cancelPurchase(id){
@@ -764,12 +842,15 @@ async function openPurchaseForm(existing){
   if(isEdit){ (existing.items||[]).forEach(it=> draftQty[it.ticketTypeId] = it.qty); }
 
   const rowsHtml = ticketTypes.map(t=>`
-    <div class="flex items-center justify-between gap-3 px-3 py-2 rounded-lg" style="background:var(--surface-2); border:1px solid var(--line);">
+    <div class="grid grid-cols-[1fr_auto] items-center gap-3 px-3 py-2 rounded-lg" style="background:var(--surface-2); border:1px solid var(--line);">
       <div class="min-w-0">
-        <div class="font-semibold">${escHtml(t.name)}</div>
-        <div class="text-xs text-[var(--text-dim)]">${escHtml(t.category||'Sin categoría')} · ${formatCurrency(t.price)}</div>
+        <div class="font-semibold truncate">${escHtml(t.name)}</div>
+        <div class="text-xs text-[var(--text-dim)] truncate">${escHtml(t.category||'Sin categoría')} · ${formatCurrency(t.price)}</div>
       </div>
-      <input type="number" min="0" step="1" data-cart-qty="${t.id}" value="${draftQty[t.id]||0}" class="w-20 text-center shrink-0">
+      <div class="flex flex-col items-center gap-1">
+        <label class="text-[10px] text-[var(--text-dim)] leading-none">Cant.</label>
+        <input type="number" min="0" step="1" data-cart-qty="${t.id}" value="${draftQty[t.id]||0}" class="qty-input font-mono">
+      </div>
     </div>
   `).join('');
 
@@ -1206,18 +1287,131 @@ async function exportExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(compras), 'Compras');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(asistentes), 'Asistentes');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumen), 'Resumen');
-  XLSX.writeFile(wb, `EventTickets_${(eventCfg?.eventName||'evento').replace(/[^a-z0-9]+/gi,'_')}_S4.xlsx`);
+  XLSX.writeFile(wb, `ElColao_${(eventCfg?.eventName||'evento').replace(/[^a-z0-9]+/gi,'_')}_${new Date().toISOString().slice(0,10)}.xlsx`);
   showToast('Archivo Excel generado', 'success', 'Exportación');
 }
 // ========== FIN: UI: ANÁLISIS ==========
 
-// ========== INICIO: ARQUITECTURA S5 BACKUP ==========
+// ========== INICIO: UI: BACKUP ==========
 const BackupService = {
-  version: 'S5-ready',
+  version: 'Final-backup-1',
   stores: ['eventConfig', 'ticketTypes', 'purchases'],
-  // Sprint 5: exportar JSON, restaurar JSON y exportar base de datos completa reutilizando estas stores.
+  async collectPayload(kind='backup'){
+    const data = {};
+    for(const store of this.stores){ data[store] = await getAll(store); }
+    return {
+      app: 'ElColao',
+      kind,
+      version: this.version,
+      dbName: DB_NAME,
+      dbVersion: DB_VERSION,
+      exportedAt: new Date().toISOString(),
+      eventName: eventCfg?.eventName || '',
+      data
+    };
+  },
+  async download(kind='backup'){
+    const payload = await this.collectPayload(kind);
+    const safeEvent = (payload.eventName || 'evento').replace(/[^a-z0-9]+/gi,'_').replace(/^_+|_+$/g,'') || 'evento';
+    const filename = `ElColao_${safeEvent}_${new Date().toISOString().slice(0,10)}.json`;
+    downloadJson(filename, payload);
+    return filename;
+  },
+  validatePayload(payload){
+    if(!payload || payload.app !== 'ElColao' || !payload.data) throw new Error('El archivo no parece ser un backup de El Colao.');
+    for(const store of this.stores){
+      if(!Array.isArray(payload.data[store])) throw new Error(`El backup no contiene la colección ${store}.`);
+    }
+    return true;
+  },
+  async restore(payload){
+    this.validatePayload(payload);
+    const t = tx(this.stores, 'readwrite');
+    await new Promise((resolve, reject)=>{
+      t.oncomplete = ()=> resolve(true);
+      t.onerror = ()=> reject(t.error);
+      t.onabort = ()=> reject(t.error || new Error('Restauración abortada'));
+      for(const storeName of this.stores){
+        const store = t.objectStore(storeName);
+        store.clear();
+        payload.data[storeName].forEach(record=> store.put(record));
+      }
+    });
+    await loadEventConfig();
+  }
 };
-// ========== FIN: ARQUITECTURA S5 BACKUP ==========
+
+function downloadJson(filename, payload){
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type:'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function readJsonFile(file){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      try{ resolve(JSON.parse(reader.result)); }
+      catch(err){ reject(new Error('El archivo seleccionado no es JSON válido.')); }
+    };
+    reader.onerror = ()=> reject(reader.error);
+    reader.readAsText(file);
+  });
+}
+
+async function renderBackup(){
+  const main = document.getElementById('mainContent');
+  const payload = await BackupService.collectPayload('preview');
+  const counts = BackupService.stores.map(store=> [store, payload.data[store].length]);
+  main.innerHTML = `
+    <h1 class="font-display text-3xl mb-2">💾 BACKUP</h1>
+    <p class="text-sm text-[var(--text-dim)] mb-6">Exporta o restaura toda la información local de IndexedDB en formato JSON. Funciona offline y no usa backend.</p>
+
+    <div class="grid md:grid-cols-3 gap-3 mb-6">
+      ${counts.map(([label,value])=>`<div class="ticket-stub p-4"><div class="text-xs text-[var(--text-dim)]">${label}</div><div class="font-display text-2xl text-[var(--accent)]">${value}</div></div>`).join('')}
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-5">
+      <div class="ticket-stub p-5">
+        <h2 class="font-display text-lg mb-2 text-[var(--accent)]">DESCARGAR DATOS</h2>
+        <p class="text-sm text-[var(--text-dim)] mb-4">Exporta en formato JSON todas las compras, configuración y tipos de ticket. Útil para respaldo o transferencia.</p>
+        <button id="btnBackupJson" class="btn btn-accent w-full">📥 Descargar JSON</button>
+      </div>
+      <div class="ticket-stub p-5">
+        <h2 class="font-display text-lg mb-2 text-[var(--accent)]">RESTAURAR DATOS</h2>
+        <p class="text-sm text-[var(--text-dim)] mb-4">Carga un archivo JSON previamente descargado. Los datos actuales se reemplazarán completamente.</p>
+        <input type="file" id="restoreJsonFile" accept="application/json,.json" class="mb-3">
+        <button id="btnRestoreJson" class="btn btn-danger w-full">⬆️ Restaurar desde JSON</button>
+      </div>
+  `;
+
+  document.getElementById('btnBackupJson').addEventListener('click', async ()=>{
+    const filename = await BackupService.download('backup');
+    showToast(filename, 'success', 'Backup descargado');
+  });
+  document.getElementById('btnRestoreJson').addEventListener('click', async ()=>{
+    const file = document.getElementById('restoreJsonFile').files[0];
+    if(!file){ await appAlert('Selecciona un archivo JSON para restaurar.', 'warning', 'Sin archivo'); return; }
+    const ok = await appConfirm('Esta acción reemplazará todos los datos actuales de EventTickets. ¿Continuar?', 'error', 'Restaurar backup', 'Restaurar', 'Cancelar', 'danger');
+    if(!ok) return;
+    try{
+      const payload = await readJsonFile(file);
+      await BackupService.restore(payload);
+      renderSidebar();
+      await renderBackup();
+      showToast('Datos restaurados correctamente', 'success', 'Restauración completa');
+    }catch(err){
+      await appAlert(err.message || 'No se pudo restaurar el archivo.', 'error', 'Error de restauración');
+    }
+  });
+}
+// ========== FIN: UI: BACKUP ==========
 
 // ========== INICIO: WIZARD CONFIGURACIÓN INICIAL ==========
 let wizardTicketDraft = [];
@@ -1240,14 +1434,13 @@ function showWizardStep(step){
 function renderWizTicketRows(){
   const wrap = document.getElementById('wizTicketList');
   if(!wizardTicketDraft.length){
-    wrap.innerHTML = `<p class="text-sm text-[var(--text-dim)] text-center py-4">Añade al menos un tipo de ticket para continuar.</p>`;
+    wrap.innerHTML = `<p class="text-sm text-[var(--text-dim)] text-center py-4">Añade al menos una categoría de ticket para continuar.</p>`;
     return;
   }
   wrap.innerHTML = wizardTicketDraft.map((row, idx)=>`
-    <div class="flex gap-2 items-start" data-wiz-row="${idx}">
-      <input type="text" placeholder="Nombre (ej: VIP)" value="${escHtml(row.name)}" data-wiz-field="name" class="flex-[1.4]">
-      <input type="text" placeholder="Categoría" value="${escHtml(row.category)}" data-wiz-field="category" class="flex-1">
-      <input type="number" placeholder="Precio" min="0" step="0.01" value="${row.price}" data-wiz-field="price" class="flex-1">
+    <div class="grid grid-cols-[1fr_7rem_auto] gap-2 items-start" data-wiz-row="${idx}">
+      <input type="text" placeholder="Categoría (ej: VIP, General)" value="${escHtml(row.category)}" data-wiz-field="category">
+      <input type="number" placeholder="Precio" min="0" step="0.01" value="${row.price}" data-wiz-field="price" class="font-mono">
       <button class="btn-ghost btn px-2 text-xs" data-wiz-remove="${idx}">🗑️</button>
     </div>
   `).join('');
@@ -1282,8 +1475,8 @@ function renderWizSummary(){
     ${wizardTicketDraft.map(t=>`
       <div class="flex justify-between items-center px-4 py-3 rounded-lg" style="background:var(--surface-2); border:1px solid var(--line);">
         <div>
-          <div class="font-semibold">${escHtml(t.name)}</div>
-          <div class="text-xs text-[var(--text-dim)]">${escHtml(t.category||'Sin categoría')}</div>
+          <div class="font-semibold">${escHtml(t.category)}</div>
+          <div class="text-xs text-[var(--text-dim)]">Categoría de ticket</div>
         </div>
         <div class="font-mono text-[var(--accent)]">${currency} ${roundMoney(t.price).toFixed(2)}</div>
       </div>
@@ -1292,12 +1485,12 @@ function renderWizSummary(){
 }
 
 function initWizard(){
-  wizardTicketDraft = [{ name:'', category:'', price:0 }];
+  wizardTicketDraft = [{ category:'', price:0 }];
   showWizardStep(1);
   renderWizTicketRows();
 
   document.getElementById('wizAddTicketRow').addEventListener('click', ()=>{
-    wizardTicketDraft.push({ name:'', category:'', price:0 });
+    wizardTicketDraft.push({ category:'', price:0 });
     renderWizTicketRows();
   });
 
@@ -1310,10 +1503,10 @@ function initWizard(){
   document.querySelector('[data-wizard-back="2"]').addEventListener('click', ()=> showWizardStep(1));
 
   document.querySelector('[data-wizard-next="2"]').addEventListener('click', async ()=>{
-    const valid = wizardTicketDraft.filter(t=> t.name.trim().length > 0);
-    if(!valid.length){ await appAlert('Agrega al menos un tipo de ticket con nombre.'); return; }
+    const valid = wizardTicketDraft.filter(t=> t.category.trim().length > 0);
+    if(!valid.length){ await appAlert('Agrega al menos una categoría de ticket.'); return; }
     for(const t of valid){
-      if(t.price < 0){ await appAlert(`El precio de "${t.name}" no puede ser negativo.`); return; }
+      if(t.price < 0){ await appAlert(`El precio de "${t.category}" no puede ser negativo.`); return; }
     }
     wizardTicketDraft = valid;
     renderWizSummary();
@@ -1337,7 +1530,7 @@ function initWizard(){
 
     for(const t of wizardTicketDraft){
       await putRecord('ticketTypes', {
-        name: t.name.trim(),
+        name: t.category.trim(),
         category: t.category.trim(),
         price: roundMoney(t.price),
         isActive: true,
