@@ -579,12 +579,10 @@ function openTicketTypeForm(existing){
   const isEdit = !!existing;
   showFormModal(`
     <h3 class="font-display text-xl mb-4">${isEdit ? 'EDITAR' : 'NUEVO'} TIPO DE TICKET</h3>
-    <label class="text-xs text-[var(--text-dim)] block mb-1">Nombre</label>
-    <input type="text" id="ftName" value="${isEdit?escHtml(existing.name):''}" placeholder="Ej: VIP, Estándar, Preventa..." class="mb-3">
     <label class="text-xs text-[var(--text-dim)] block mb-1">Categoría</label>
-    <input type="text" id="ftCategory" value="${isEdit?escHtml(existing.category||''):''}" placeholder="Ej: General, Promoción..." class="mb-3">
+    <input type="text" id="ftCategory" value="${isEdit?escHtml(existing.name):''}" placeholder="Ej: VIP, Estándar, Preventa..." class="mb-3">
     <label class="text-xs text-[var(--text-dim)] block mb-1">Precio</label>
-    <input type="number" id="ftPrice" min="0" step="0.01" value="${isEdit?existing.price:''}" placeholder="0.00" class="mb-5">
+    <input type="number" id="ftPrice" min="1" step="0.01" value="${isEdit?existing.price:''}" placeholder="1.00" class="mb-5">
     <div class="flex justify-end gap-2">
       <button class="btn btn-ghost" id="ftCancel">Cancelar</button>
       <button class="btn btn-accent" id="ftSave">Guardar</button>
@@ -592,13 +590,12 @@ function openTicketTypeForm(existing){
   `);
   document.getElementById('ftCancel').addEventListener('click', hideFormModal);
   document.getElementById('ftSave').addEventListener('click', async ()=>{
-    const name = document.getElementById('ftName').value.trim();
     const category = document.getElementById('ftCategory').value.trim();
     const price = roundMoney(document.getElementById('ftPrice').value);
-    if(!name){ await appAlert('El nombre del tipo de ticket es obligatorio.'); return; }
-    if(price < 0){ await appAlert('El precio no puede ser negativo.'); return; }
+    if(!category){ await appAlert('La categoría del tipo de ticket es obligatoria.'); return; }
+    if(price <= 0){ await appAlert('El precio debe ser mayor que 0.'); return; }
     const record = isEdit ? { ...existing } : { isActive:true, createdAt: Date.now() };
-    record.name = name;
+    record.name = category;
     record.category = category;
     record.price = price;
     await putRecord('ticketTypes', record);
@@ -715,6 +712,7 @@ function renderPurchaseCard(p){
       </div>
       <div class="flex items-center gap-2 shrink-0">
         <div class="font-mono text-[var(--accent)] font-semibold">${formatCurrency(p.totalAmount)}</div>
+        <button class="btn-ghost btn px-2 py-1 text-xs" data-detail-purchase="${p.id}">📝</button>
         ${canEdit ? `<button class="btn-ghost btn px-2 py-1 text-xs" data-edit-purchase="${p.id}">✏️</button>` : ''}
         ${p.status==='cancelled'
           ? `<button class="btn-ghost btn px-2 py-1 text-xs" data-reactivate-purchase="${p.id}">↩️</button>`
@@ -781,6 +779,12 @@ async function renderPurchasesList(){
 
   wrap.innerHTML = html + paginationHtml;
 
+  wrap.querySelectorAll('[data-detail-purchase]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const p = await getById('purchases', Number(btn.dataset.detailPurchase));
+      openPurchaseDetail(p);
+    });
+  });
   wrap.querySelectorAll('[data-edit-purchase]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       const p = await getById('purchases', Number(btn.dataset.editPurchase));
@@ -831,6 +835,32 @@ async function reactivatePurchase(id){
   renderPurchasesList();
 }
 
+async function openPurchaseDetail(p){
+  if(!p) return;
+  showFormModal(`
+    <h3 class="font-display text-xl mb-1">DETALLE DE LA COMPRA</h3>
+    <p class="text-xs text-[var(--text-dim)] mb-4">${escHtml(p.buyerName)} · CI <span class="font-mono">${escHtml(p.ci)}</span></p>
+
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Notas / Aclaraciones</label>
+    <textarea id="detailNotes" class="mb-3 h-24" placeholder="Ej: Mesa 5, zona VIP. Alergia a frutos secos. Reserva bajo nombre de la novia.">${escHtml(p.notes||'')}</textarea>
+
+    <div class="flex justify-end gap-2">
+      <button class="btn btn-ghost" id="detailCancel">Cancelar</button>
+      <button class="btn btn-accent" id="detailSave">Guardar notas</button>
+    </div>
+  `, 'max-w-md');
+
+  document.getElementById('detailCancel').addEventListener('click', hideFormModal);
+  document.getElementById('detailSave').addEventListener('click', async ()=>{
+    const notes = document.getElementById('detailNotes').value.trim();
+    p.notes = notes;
+    await putRecord('purchases', p);
+    hideFormModal();
+    showToast('Notas guardadas', 'success');
+    renderPurchasesList();
+  });
+}
+
 async function openPurchaseForm(existing){
   const ticketTypes = (await getAll('ticketTypes')).filter(t=>t.isActive).sort((a,b)=> a.id-b.id);
   if(!ticketTypes.length){
@@ -878,6 +908,9 @@ async function openPurchaseForm(existing){
       <label class="text-xs text-[var(--text-dim)] block mb-1">Detalle del pago</label>
       <input type="text" id="pPaymentNote" value="${isEdit?escHtml(existing.paymentNote||''):''}" placeholder="Ej: Zelle, depósito...">
     </div>
+
+    <label class="text-xs text-[var(--text-dim)] block mb-1">Notas / Aclaraciones</label>
+    <textarea id="pNotes" class="mb-3 h-16" placeholder="Ej: Mesa 5, zona VIP. Alergia a frutos secos. Reserva especial...">${isEdit?escHtml(existing.notes||''):''}</textarea>
 
     <div class="flex justify-end gap-2 mt-5">
       <button class="btn btn-ghost" id="pCancelBtn">Cancelar</button>
@@ -938,6 +971,7 @@ async function openPurchaseForm(existing){
     record.ci = ci;
     record.paymentType = paymentType;
     record.paymentNote = paymentNote;
+    record.notes = document.getElementById('pNotes').value.trim();
     record.items = items;
     record.totalQuantity = totalQuantity;
     record.totalAmount = totalAmount;
@@ -985,13 +1019,14 @@ function renderEntradaCard(p){
   }
   return `
     <div class="ticket-stub p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-      <div class="min-w-0">
+      <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2 flex-wrap mb-1.5">
           <span class="font-semibold">${escHtml(p.buyerName)}</span>
           <span class="font-mono text-xs text-[var(--text-dim)]">CI ${escHtml(p.ci)}</span>
           <span class="badge" style="background:${meta.bg}; color:${meta.color};">${meta.label}</span>
         </div>
-        <div class="flex gap-1.5 flex-wrap">${itemsHtml}</div>
+        <div class="flex gap-1.5 flex-wrap mb-2">${itemsHtml}</div>
+        ${p.notes ? `<div class="text-xs text-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] px-2 py-1.5 rounded-lg border-l-2" style="border-color:var(--accent);">📌 ${escHtml(p.notes)}</div>` : ''}
       </div>
       <div class="shrink-0">${actionHtml}</div>
     </div>
@@ -1121,13 +1156,14 @@ function renderFiestaCard(p){
   const timeStr = p.lastEntryAt ? new Date(p.lastEntryAt).toLocaleTimeString('es', { hour:'2-digit', minute:'2-digit' }) : '';
   return `
     <div class="ticket-stub p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-      <div class="min-w-0">
+      <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2 flex-wrap mb-1.5">
           <span class="font-semibold">${escHtml(p.buyerName)}</span>
           <span class="font-mono text-xs text-[var(--text-dim)]">CI ${escHtml(p.ci)}</span>
           <span class="badge" style="background:${meta.bg}; color:${meta.color};">${meta.label}</span>
         </div>
-        <div class="flex gap-1.5 flex-wrap">${itemsHtml}</div>
+        <div class="flex gap-1.5 flex-wrap mb-2">${itemsHtml}</div>
+        ${p.notes ? `<div class="text-xs text-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_5%,transparent)] px-2 py-1.5 rounded-lg border-l-2" style="border-color:var(--accent);">📌 ${escHtml(p.notes)}</div>` : ''}
       </div>
       <div class="flex items-center gap-2 shrink-0">
         ${timeStr ? `<span class="text-xs text-[var(--text-dim)] font-mono">⏱ ${timeStr}</span>` : ''}
@@ -1506,7 +1542,7 @@ function initWizard(){
     const valid = wizardTicketDraft.filter(t=> t.category.trim().length > 0);
     if(!valid.length){ await appAlert('Agrega al menos una categoría de ticket.'); return; }
     for(const t of valid){
-      if(t.price < 0){ await appAlert(`El precio de "${t.category}" no puede ser negativo.`); return; }
+      if(t.price <= 0){ await appAlert(`El precio de "${t.category}" debe ser mayor que 0.`); return; }
     }
     wizardTicketDraft = valid;
     renderWizSummary();
