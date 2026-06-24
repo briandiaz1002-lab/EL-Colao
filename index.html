@@ -593,7 +593,7 @@ function openTicketTypeForm(existing){
     const category = document.getElementById('ftCategory').value.trim();
     const price = roundMoney(document.getElementById('ftPrice').value);
     if(!category){ await appAlert('La categoría del tipo de ticket es obligatoria.'); return; }
-    if(price <= 0){ await appAlert('El precio debe ser mayor que 0.'); return; }
+    if(!price || price < 1){ await appAlert('El precio debe ser un valor positivo.'); return; }
     const record = isEdit ? { ...existing } : { isActive:true, createdAt: Date.now() };
     record.name = category;
     record.category = category;
@@ -1374,6 +1374,76 @@ const BackupService = {
       }
     });
     await loadEventConfig();
+  },
+  // Compara dos payloads para detectar compatibilidad
+  comparePayloads(current, incoming){
+    const currentCfg = current.data.eventConfig[0] || {};
+    const incomingCfg = incoming.data.eventConfig[0] || {};
+    
+    const currentEvent = currentCfg.eventName || 'Sin nombre';
+    const incomingEvent = incomingCfg.eventName || 'Sin nombre';
+    const currentTickets = current.data.ticketTypes || [];
+    const incomingTickets = incoming.data.ticketTypes || [];
+    
+    // Comparar tipos de tickets por nombre y precio
+    const currentTicketMap = new Map(currentTickets.map(t=> [`${t.name}|${t.price}`, t]));
+    const incomingTicketMap = new Map(incomingTickets.map(t=> [`${t.name}|${t.price}`, t]));
+    
+    const matching = [];
+    const different = [];
+    const onlyInCurrent = [];
+    const onlyInIncoming = [];
+    
+    for(const [key, ticket] of currentTicketMap){
+      if(incomingTicketMap.has(key)) matching.push(ticket);
+      else onlyInCurrent.push(ticket);
+    }
+    for(const [key, ticket] of incomingTicketMap){
+      if(!currentTicketMap.has(key)) onlyInIncoming.push(ticket);
+    }
+    
+    return {
+      sameEvent: currentEvent === incomingEvent,
+      currentEvent, incomingEvent,
+      ticketsMatch: matching.length > 0 && onlyInCurrent.length === 0 && onlyInIncoming.length === 0,
+      matching, onlyInCurrent, onlyInIncoming,
+      currentPurchases: current.data.purchases.length,
+      incomingPurchases: incoming.data.purchases.length
+    };
+  },
+  // Fusiona dos payloads (agrega compras nuevas sin duplicar)
+  async mergePayloads(currentPayload, incomingPayload){
+    this.validatePayload(incomingPayload);
+    
+    // Mantener la configuración actual
+    const mergedData = {
+      eventConfig: currentPayload.data.eventConfig,
+      ticketTypes: currentPayload.data.ticketTypes,
+      purchases: [...currentPayload.data.purchases]
+    };
+    
+    // Agregar compras nuevas (por ID) si no existen
+    const currentPurchaseIds = new Set(mergedData.purchases.map(p=> p.id));
+    const newPurchases = incomingPayload.data.purchases.filter(p=> !currentPurchaseIds.has(p.id));
+    mergedData.purchases.push(...newPurchases);
+    
+    // Actualizar eventConfig solo si está vacío
+    if(!mergedData.eventConfig.length){
+      mergedData.eventConfig = incomingPayload.data.eventConfig;
+    }
+    
+    const merged = {
+      app: 'ElColao',
+      kind: 'merged',
+      version: this.version,
+      dbName: DB_NAME,
+      dbVersion: DB_VERSION,
+      exportedAt: new Date().toISOString(),
+      eventName: mergedData.eventConfig[0]?.eventName || '',
+      data: mergedData
+    };
+    
+    return merged;
   }
 };
 
@@ -1413,7 +1483,7 @@ async function renderBackup(){
       ${counts.map(([label,value])=>`<div class="ticket-stub p-4"><div class="text-xs text-[var(--text-dim)]">${label}</div><div class="font-display text-2xl text-[var(--accent)]">${value}</div></div>`).join('')}
     </div>
 
-    <div class="grid md:grid-cols-2 gap-5">
+    <div class="grid md:grid-cols-2 gap-5 mb-5">
       <div class="ticket-stub p-5">
         <h2 class="font-display text-lg mb-2 text-[var(--accent)]">DESCARGAR DATOS</h2>
         <p class="text-sm text-[var(--text-dim)] mb-4">Exporta en formato JSON todas las compras, configuración y tipos de ticket. Útil para respaldo o transferencia.</p>
@@ -1425,16 +1495,25 @@ async function renderBackup(){
         <input type="file" id="restoreJsonFile" accept="application/json,.json" class="mb-3">
         <button id="btnRestoreJson" class="btn btn-danger w-full">⬆️ Restaurar desde JSON</button>
       </div>
+    </div>
+
+    <div class="ticket-stub p-5 border-l-4" style="border-color:var(--violet);">
+      <h2 class="font-display text-lg mb-2 text-[var(--violet)]">🔗 FUSIONAR BASES DE DATOS</h2>
+      <p class="text-sm text-[var(--text-dim)] mb-4">Útil cuando trabajas en múltiples dispositivos simultáneamente. Compara el evento, tipos de tickets y precios. Si coinciden, fusiona las compras sin duplicar.</p>
+      <input type="file" id="mergeJsonFile" accept="application/json,.json" class="mb-3">
+      <button id="btnMergeJson" class="btn btn-accent w-full">🔀 Iniciar fusión inteligente</button>
+    </div>
   `;
 
   document.getElementById('btnBackupJson').addEventListener('click', async ()=>{
     const filename = await BackupService.download('backup');
     showToast(filename, 'success', 'Backup descargado');
   });
+  
   document.getElementById('btnRestoreJson').addEventListener('click', async ()=>{
     const file = document.getElementById('restoreJsonFile').files[0];
     if(!file){ await appAlert('Selecciona un archivo JSON para restaurar.', 'warning', 'Sin archivo'); return; }
-    const ok = await appConfirm('Esta acción reemplazará todos los datos actuales de EventTickets. ¿Continuar?', 'error', 'Restaurar backup', 'Restaurar', 'Cancelar', 'danger');
+    const ok = await appConfirm('Esta acción reemplazará todos los datos actuales de El Colao. ¿Continuar?', 'error', 'Restaurar backup', 'Restaurar', 'Cancelar', 'danger');
     if(!ok) return;
     try{
       const payload = await readJsonFile(file);
@@ -1446,6 +1525,151 @@ async function renderBackup(){
       await appAlert(err.message || 'No se pudo restaurar el archivo.', 'error', 'Error de restauración');
     }
   });
+
+  document.getElementById('btnMergeJson').addEventListener('click', async ()=>{
+    const file = document.getElementById('mergeJsonFile').files[0];
+    if(!file){ await appAlert('Selecciona un archivo JSON para fusionar.', 'warning', 'Sin archivo'); return; }
+    try{
+      const incomingPayload = await readJsonFile(file);
+      await openMergeDialog(incomingPayload);
+    }catch(err){
+      await appAlert(err.message || 'No se pudo leer el archivo.', 'error', 'Error de lectura');
+    }
+  });
+}
+
+async function openMergeDialog(incomingPayload){
+  BackupService.validatePayload(incomingPayload);
+  const current = await BackupService.collectPayload('current');
+  const comparison = BackupService.comparePayloads(current, incomingPayload);
+
+  let compatibilityHtml = '';
+  let actionButtons = '';
+
+  if(!comparison.sameEvent){
+    // Eventos diferentes
+    compatibilityHtml = `
+      <div style="background:var(--danger); background-color:color-mix(in_srgb,var(--danger)_10%,transparent); border:1px solid color-mix(in_srgb,var(--danger)_30%,transparent); padding:1rem; border-radius:0.5rem; margin-bottom:1rem;">
+        <div class="text-sm font-semibold" style="color:var(--danger);">⚠️ EVENTOS DIFERENTES</div>
+        <div class="text-xs text-[var(--text-dim)] mt-1">Este dispositivo: <strong>${escHtml(comparison.currentEvent)}</strong></div>
+        <div class="text-xs text-[var(--text-dim)]">Archivo a fusionar: <strong>${escHtml(comparison.incomingEvent)}</strong></div>
+      </div>
+    `;
+    actionButtons = `
+      <button class="btn btn-danger" id="mergeForceDifferent">⚠️ Sobrescribir evento</button>
+      <button class="btn btn-ghost" id="mergeCancel">Cancelar</button>
+    `;
+  } else if(!comparison.ticketsMatch && comparison.onlyInCurrent.length > 0 && comparison.onlyInIncoming.length > 0){
+    // Tipos de tickets incompatibles
+    compatibilityHtml = `
+      <div style="background:var(--danger); background-color:color-mix(in_srgb,var(--danger)_10%,transparent); border:1px solid color-mix(in_srgb,var(--danger)_30%,transparent); padding:1rem; border-radius:0.5rem; margin-bottom:1rem;">
+        <div class="text-sm font-semibold" style="color:var(--danger);">⚠️ TIPOS DE TICKETS INCOMPATIBLES</div>
+        <div class="text-xs text-[var(--text-dim)] mt-2">Solo en este dispositivo:</div>
+        <div class="text-xs">${comparison.onlyInCurrent.map(t=> `${escHtml(t.name)} · ${formatCurrency(t.price)}`).join(', ')}</div>
+        <div class="text-xs text-[var(--text-dim)] mt-2">Solo en el archivo:</div>
+        <div class="text-xs">${comparison.onlyInIncoming.map(t=> `${escHtml(t.name)} · ${formatCurrency(t.price)}`).join(', ')}</div>
+      </div>
+    `;
+    actionButtons = `
+      <button class="btn btn-danger" id="mergeOverwrite">🔄 Sobrescribir tickets</button>
+      <button class="btn btn-ghost" id="mergeCancel">Cancelar</button>
+    `;
+  } else {
+    // Eventos compatibles, se puede fusionar
+    compatibilityHtml = `
+      <div style="background:var(--success); background-color:color-mix(in_srgb,var(--success)_10%,transparent); border:1px solid color-mix(in_srgb,var(--success)_30%,transparent); padding:1rem; border-radius:0.5rem; margin-bottom:1rem;">
+        <div class="text-sm font-semibold" style="color:var(--success);">✅ COMPATIBLE — Se puede fusionar</div>
+        <div class="text-xs text-[var(--text-dim)] mt-2">Evento: <strong>${escHtml(comparison.currentEvent)}</strong></div>
+        <div class="text-xs text-[var(--text-dim)]">Tipos de tickets coinciden</div>
+      </div>
+    `;
+    actionButtons = `
+      <button class="btn btn-accent" id="mergeYes">✓ Fusionar compras</button>
+      <button class="btn btn-ghost" id="mergeCancel">Cancelar</button>
+    `;
+  }
+
+  showFormModal(`
+    <h3 class="font-display text-xl mb-1">FUSIONAR BASES DE DATOS</h3>
+    <p class="text-xs text-[var(--text-dim)] mb-4">Comparando configuraciones...</p>
+
+    ${compatibilityHtml}
+
+    <div class="mb-4 space-y-2">
+      <div class="grid grid-cols-2 gap-2 text-sm">
+        <div style="background:var(--surface-2); padding:0.75rem; border-radius:0.5rem; border:1px solid var(--line);">
+          <div class="text-xs text-[var(--text-dim)]">Este dispositivo</div>
+          <div class="font-semibold text-[var(--accent)]">${comparison.currentPurchases}</div>
+          <div class="text-xs text-[var(--text-dim)]">compras</div>
+        </div>
+        <div style="background:var(--surface-2); padding:0.75rem; border-radius:0.5rem; border:1px solid var(--line);">
+          <div class="text-xs text-[var(--text-dim)]">Archivo a fusionar</div>
+          <div class="font-semibold text-[var(--accent)]">${comparison.incomingPurchases}</div>
+          <div class="text-xs text-[var(--text-dim)]">compras</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex justify-end gap-2">
+      ${actionButtons}
+    </div>
+  `, 'max-w-md');
+
+  const mergeYes = document.getElementById('mergeYes');
+  if(mergeYes){
+    mergeYes.addEventListener('click', async ()=>{
+      const merged = await BackupService.mergePayloads(current, incomingPayload);
+      await BackupService.restore(merged);
+      hideFormModal();
+      renderSidebar();
+      await renderBackup();
+      const newCount = merged.data.purchases.length;
+      showToast(`Fusión completada: ${newCount} compras totales`, 'success', '✓ Bases fusionadas');
+    });
+  }
+
+  const mergeForceDifferent = document.getElementById('mergeForceDifferent');
+  if(mergeForceDifferent){
+    mergeForceDifferent.addEventListener('click', async ()=>{
+      const ok = await appConfirm(
+        `El evento será reemplazado: "${comparison.currentEvent}" → "${comparison.incomingEvent}". Los tipos de tickets también se actualizarán, pero las compras actuales se conservarán.`,
+        'error', 'Sobrescribir evento', 'Continuar', 'Cancelar', 'danger'
+      );
+      if(!ok) return;
+      // Mantener compras actuales, actualizar config y tipos de tickets
+      const merged = await BackupService.mergePayloads(current, incomingPayload);
+      merged.data.eventConfig = incomingPayload.data.eventConfig;
+      merged.data.ticketTypes = incomingPayload.data.ticketTypes;
+      await BackupService.restore(merged);
+      hideFormModal();
+      renderSidebar();
+      await renderBackup();
+      showToast('Evento y tipos de tickets actualizados', 'success', '✓ Sobrescrito');
+    });
+  }
+
+  const mergeOverwrite = document.getElementById('mergeOverwrite');
+  if(mergeOverwrite){
+    mergeOverwrite.addEventListener('click', async ()=>{
+      const ok = await appConfirm(
+        `Los tipos de tickets serán reemplazados, pero las compras actuales se conservarán. ¿Continuar?`,
+        'error', 'Sobrescribir tipos de tickets', 'Continuar', 'Cancelar', 'danger'
+      );
+      if(!ok) return;
+      const merged = await BackupService.mergePayloads(current, incomingPayload);
+      merged.data.ticketTypes = incomingPayload.data.ticketTypes;
+      await BackupService.restore(merged);
+      hideFormModal();
+      renderSidebar();
+      await renderBackup();
+      showToast('Tipos de tickets actualizados', 'success', '✓ Actualizado');
+    });
+  }
+
+  const mergeCancel = document.getElementById('mergeCancel');
+  if(mergeCancel){
+    mergeCancel.addEventListener('click', hideFormModal);
+  }
 }
 // ========== FIN: UI: BACKUP ==========
 
@@ -1542,7 +1766,7 @@ function initWizard(){
     const valid = wizardTicketDraft.filter(t=> t.category.trim().length > 0);
     if(!valid.length){ await appAlert('Agrega al menos una categoría de ticket.'); return; }
     for(const t of valid){
-      if(t.price <= 0){ await appAlert(`El precio de "${t.category}" debe ser mayor que 0.`); return; }
+      if(t.price < 0){ await appAlert(`El precio de "${t.category}" no puede ser negativo.`); return; }
     }
     wizardTicketDraft = valid;
     renderWizSummary();
