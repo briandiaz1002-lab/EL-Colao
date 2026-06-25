@@ -223,13 +223,23 @@
 <script>
 // ========== INICIO: CONFIGURACIÓN Y CONSTANTES ==========
 const DB_NAME = 'ElColaoDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // Incrementado por nuevos stores
 let db = null;
 let eventCfg = null; // cache del registro eventConfig
 let currentSection = 'compras';
 const ITEMS_PER_PAGE = 20;
 let purchasesCurrentPage = 1;
 let comprasTotalPages = 1;
+
+// ========== SUPABASE CONFIGURACIÓN ==========
+const SUPABASE_URL = 'https://iizljgpzutiisheesafy.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlpemxqZ3B6dXRpaXNoZWVzYWZ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMjI1MDgsImV4cCI6MjA5Nzg5ODUwOH0.ltkHxDuW5OrCQr_KeNV6XkyYDvSRJKoul8b11BceIb8';
+const SUPABASE_EVENT_ID = 1; // ID del evento en Supabase (cambiar si es diferente)
+let supabase = null; // Se inicializa después
+let realtimeSubscription = null; // Para desuscribirse
+let currentDeviceId = null; // ID único de este dispositivo
+let isOnline = navigator.onLine; // Estado actual de conexión
+// ========== FIN SUPABASE CONFIGURACIÓN ==========
 const UNIQUE_CI = false; // true: bloquea carnets duplicados activos; false: permite múltiples compras por carnet.
 
 const SECTIONS = [
@@ -256,11 +266,24 @@ function openDatabase(){
         ts.createIndex('isActive', 'isActive', { unique:false });
       }
       if(!_db.objectStoreNames.contains('purchases')){
-        const ps = _db.createObjectStore('purchases', { keyPath:'id', autoIncrement:true });
+        const ps = _db.createObjectStore('purchases', { keyPath:'id' });
         ps.createIndex('ci', 'ci', { unique:false });
         ps.createIndex('status', 'status', { unique:false });
         ps.createIndex('createdAt', 'createdAt', { unique:false });
       }
+      // ========== STORES NUEVOS PARA SINCRONIZACIÓN ==========
+      if(!_db.objectStoreNames.contains('syncQueue')){
+        const sq = _db.createObjectStore('syncQueue', { keyPath:'id' });
+        sq.createIndex('synced', 'synced', { unique:false });
+        sq.createIndex('timestamp', 'timestamp', { unique:false });
+      }
+      if(!_db.objectStoreNames.contains('deviceInfo')){
+        _db.createObjectStore('deviceInfo', { keyPath:'id' });
+      }
+      if(!_db.objectStoreNames.contains('lastSync')){
+        _db.createObjectStore('lastSync', { keyPath:'id' });
+      }
+      // ========== FIN STORES NUEVOS ==========
     };
     req.onsuccess = (e)=> resolve(e.target.result);
     req.onerror = (e)=> reject(e.target.error);
@@ -413,6 +436,239 @@ function hideFormModal(){
   document.getElementById('formModalBox').innerHTML = '';
 }
 // ========== FIN: UTILIDADES ==========
+
+// ========== INICIO: SINCRONIZACIÓN SUPABASE ==========
+/**
+ * MÓDULO DE SINCRONIZACIÓN
+ * Maneja:
+ * - Cola de cambios locales (syncQueue)
+ * - Inicialización de Supabase
+ * - Escucha de cambios remotos (Realtime)
+ * - Detección online/offline
+ */
+
+// Inicializar Supabase (con fallback si no está disponible)
+async function initSupabase(){
+  if(supabase) return; // Ya inicializado
+  
+  // Si no hay SDK cargado, intentar cargar dinámicamente
+  if(!window.supabase){
+    try{
+      // Cargar SDK de forma dinámica (URL oficial recomendada por Supabase: crea window.supabase)
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+      
+      // Esperar a que supabase esté disponible
+      let retries = 0;
+      while(!window.supabase && retries < 30){
+        await new Promise(r => setTimeout(r, 100));
+        retries++;
+      }
+      
+      if(!window.supabase){
+        throw new Error('Supabase SDK no cargó correctamente');
+      }
+    }catch(err){
+      console.warn('⚠️ No se pudo cargar SDK Supabase:', err);
+      console.log('Continuando en modo offline-only');
+      return;
+    }
+  }
+  
+  try{
+    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    console.log('✅ Supabase inicializado');
+    
+    // Generar o recuperar deviceId
+    await initDeviceId();
+    
+    // Escuchar cambios de conectividad
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    
+    // Sincronizar cola al iniciar (si hay conexión)
+    if(navigator.onLine){
+      await processSyncQueue();
+    }
+  }catch(err){
+    console.error('❌ Error inicializando Supabase:', err);
+    console.log('⚠️ La app continuará funcionando offline');
+  }
+}
+
+// Inicializar o recuperar deviceId único de este dispositivo
+async function initDeviceId(){
+  let deviceInfo = await getById('deviceInfo', 1);
+  if(!deviceInfo){
+    deviceInfo = {
+      id: 1,
+      deviceId: `device_${Date.now()}_${Math.random().toString(36).substr(2,9)}`,
+      createdAt: Date.now()
+    };
+    await putRecord('deviceInfo', deviceInfo);
+  }
+  currentDeviceId = deviceInfo.deviceId;
+  console.log('Device ID:', currentDeviceId);
+}
+
+// Manejar conexión online
+async function onOnline(){
+  isOnline = true;
+  showToast('Conexión establecida', 'success', '🔌 Online');
+  console.log('🟢 Online');
+  
+  // Intentar sincronizar cola
+  await processSyncQueue();
+  
+  // Recargar datos de Supabase
+  if(currentSection === 'compras'){
+    purchasesCurrentPage = 1;
+    await renderPurchasesList();
+  }
+  if(currentSection === 'entrada') await renderEntradaResults();
+  if(currentSection === 'fiesta') await renderFiestaList();
+}
+
+// Manejar desconexión offline
+function onOffline(){
+  isOnline = false;
+  showToast('Sin conexión — continuando offline', 'warning', '📴 Offline');
+  console.log('🔴 Offline');
+}
+
+// Agregar cambio a la cola de sincronización
+async function enqueueSyncChange(action, store, record){
+  if(!record.id){
+    console.error('Record sin ID, no se puede sincronizar:', record);
+    return;
+  }
+  
+  const syncItem = {
+    id: `${action}_${store}_${record.id}_${Date.now()}`,
+    action,        // 'INSERT', 'UPDATE', 'DELETE'
+    store,         // 'purchases', 'ticketTypes', 'eventConfig'
+    recordId: record.id,
+    record,
+    timestamp: Date.now(),
+    synced: false,
+    retries: 0
+  };
+  
+  await putRecord('syncQueue', syncItem);
+  console.log('📌 Cambio encolado:', action, store, record.id);
+  
+  // Intentar enviar inmediatamente si hay conexión
+  if(navigator.onLine){
+    await processSyncQueue();
+  }
+}
+
+// Procesar la cola de cambios pendientes
+async function processSyncQueue(){
+  if(!supabase || !navigator.onLine) return;
+  
+  console.log('🔄 Procesando syncQueue...');
+  
+  const pending = await getAll('syncQueue');
+  if(!pending.length){
+    console.log('✅ syncQueue vacía');
+    return;
+  }
+  
+  for(const item of pending){
+    try{
+      if(item.action === 'INSERT' || item.action === 'UPDATE'){
+        // Enviar a Supabase (upsert = insert o update automáticamente)
+        const { error } = await supabase
+          .from('purchases')
+          .upsert(item.record, { onConflict: 'id' });
+        
+        if(error) throw error;
+      } else if(item.action === 'DELETE'){
+        const { error } = await supabase
+          .from('purchases')
+          .delete()
+          .eq('id', item.recordId);
+        
+        if(error) throw error;
+      }
+      
+      // Marcar como sincronizado
+      await deleteRecord('syncQueue', item.id);
+      console.log('✅ Sincronizado:', item.action, item.store, item.recordId);
+      
+    }catch(err){
+      item.retries = (item.retries || 0) + 1;
+      
+      if(item.retries > 5){
+        console.error('❌ Sync fallido después de 5 intentos:', item, err);
+        showToast(`Error sincronizando ${item.recordId}`, 'error');
+      } else {
+        await putRecord('syncQueue', item);
+      }
+    }
+  }
+}
+
+// Escuchar cambios en tiempo real desde Supabase
+function setupRealtimeListener(){
+  if(!supabase || realtimeSubscription) return;
+  
+  console.log('📡 Configurando Realtime listener...');
+  
+  try{
+    realtimeSubscription = supabase
+      .from('purchases')
+      .on('*', async payload => {
+        const { eventType, new: newRecord, old: oldRecord } = payload;
+        
+        // Ignorar cambios que vinieron de este dispositivo
+        if(newRecord && newRecord.deviceId === currentDeviceId){
+          console.log('⊘ Ignorando cambio propio:', eventType, newRecord.id);
+          return;
+        }
+        
+        console.log('📥 Cambio remoto recibido:', eventType, newRecord?.id || oldRecord?.id);
+        
+        // Actualizar IndexedDB local
+        if(eventType === 'DELETE'){
+          await deleteRecord('purchases', oldRecord.id);
+        } else {
+          await putRecord('purchases', newRecord);
+        }
+        
+        // Actualizar UI si estamos mirando ese section
+        if(currentSection === 'compras'){
+          purchasesCurrentPage = 1;
+          await renderPurchasesList();
+        }
+        if(currentSection === 'entrada') await renderEntradaResults();
+        if(currentSection === 'fiesta') await renderFiestaList();
+        
+        console.log('✅ UI actualizada con cambios remotos');
+      })
+      .subscribe((status) => {
+        console.log('Realtime subscription status:', status);
+      });
+  }catch(err){
+    console.warn('⚠️ No se pudo configurar Realtime listener:', err);
+  }
+}
+
+// Desuscribirse del listener
+function cleanupRealtimeListener(){
+  if(realtimeSubscription){
+    realtimeSubscription.unsubscribe();
+    realtimeSubscription = null;
+    console.log('🛑 Realtime listener desactivado');
+  }
+}
+// ========== FIN: SINCRONIZACIÓN SUPABASE ==========
 
 // ========== INICIO: UI: SIDEBAR Y NAVEGACIÓN ==========
 function renderSidebar(){
@@ -963,9 +1219,18 @@ async function openPurchaseForm(existing){
     const totalQuantity = items.reduce((s,it)=> s+it.qty, 0);
     const totalAmount = roundMoney(items.reduce((s,it)=> s+(it.qty*it.price), 0));
 
+    // ========== NUEVO: GENERAR ID ÚNICO Y VINCULAR A EVENTO ==========
     const record = isEdit
       ? { ...existing }
-      : { status:'pending', enteredCount:0, enteredAt:null, createdAt: Date.now() };
+      : { 
+          id: `purchase_${Date.now()}_${Math.random().toString(36).substr(2,9)}`,
+          eventId: SUPABASE_EVENT_ID,  // NUEVO: vincular al evento
+          status:'pending', 
+          enteredCount:0, 
+          enteredAt:null, 
+          createdAt: Date.now() 
+        };
+    // ========== FIN GENERACIÓN ID ==========
 
     record.buyerName = buyerName;
     record.ci = ci;
@@ -975,6 +1240,7 @@ async function openPurchaseForm(existing){
     record.items = items;
     record.totalQuantity = totalQuantity;
     record.totalAmount = totalAmount;
+    record.eventId = SUPABASE_EVENT_ID;  // NUEVO: asegurar que eventId está siempre presente
 
     if(UNIQUE_CI){
       const purchases = await getAll('purchases');
@@ -983,6 +1249,13 @@ async function openPurchaseForm(existing){
     }
 
     await putRecord('purchases', record);
+    
+    // ========== NUEVO: SINCRONIZAR CON SUPABASE ==========
+    record.deviceId = currentDeviceId;
+    record.updatedAt = Date.now();
+    await enqueueSyncChange(isEdit ? 'UPDATE' : 'INSERT', 'purchases', record);
+    // ========== FIN SINCRONIZACIÓN ==========
+    
     hideFormModal();
     showToast(`Compra ${isEdit?'actualizada':'registrada'} · ${totalQuantity} ticket(s)`, 'success');
     renderPurchasesList();
@@ -1001,6 +1274,11 @@ async function renderEntrada(){
   `;
   document.getElementById('entradaSearch').addEventListener('input', renderEntradaResults);
   document.getElementById('entradaSearch').focus();
+  
+  // ========== NUEVO: ESCUCHAR CAMBIOS EN TIEMPO REAL ==========
+  setupRealtimeListener();
+  // ========== FIN REALTIME ==========
+  
   await renderEntradaResults();
 }
 
@@ -1063,7 +1341,16 @@ async function markEntry(purchaseId, newCount){
   if(newCount > 0 && !p.enteredAt) p.enteredAt = Date.now();
   if(newCount === 0) p.enteredAt = null;
   p.lastEntryAt = newCount > 0 ? Date.now() : null;
+  p.deviceId = currentDeviceId; // Marcar quién hizo este cambio
+  p.updatedAt = Date.now();      // Timestamp local
+  
+  // Guardar localmente
   await putRecord('purchases', p);
+  
+  // ========== NUEVO: SINCRONIZAR CON SUPABASE ==========
+  await enqueueSyncChange('UPDATE', 'purchases', p);
+  // ========== FIN SINCRONIZACIÓN ==========
+  
   showToast(
     `${p.buyerName}: ${newCount}/${p.totalQuantity} dentro`,
     'success',
@@ -1145,6 +1432,11 @@ async function renderFiesta(){
     <div id="fiestaList" class="space-y-3"></div>
   `;
   document.getElementById('fiestaSearch').addEventListener('input', renderFiestaList);
+  
+  // ========== NUEVO: ESCUCHAR CAMBIOS EN TIEMPO REAL ==========
+  setupRealtimeListener();
+  // ========== FIN REALTIME ==========
+  
   await renderFiestaList();
 }
 
@@ -1814,6 +2106,10 @@ async function init(){
 
   document.getElementById('mobileMenuBtn').addEventListener('click', openMobileNav);
   document.getElementById('mobileMenuClose').addEventListener('click', closeMobileNav);
+
+  // ========== NUEVO: INICIALIZAR SUPABASE ==========
+  await initSupabase();
+  // ========== FIN INICIALIZACIÓN SUPABASE ==========
 
   if(!eventCfg.setupCompleted){
     document.getElementById('wizardOverlay').classList.remove('hidden');
