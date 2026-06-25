@@ -454,11 +454,10 @@ async function initSupabase(){
   // Si no hay SDK cargado, intentar cargar dinámicamente
   if(!window.supabase){
     try{
-      // Cargar SDK de forma dinámica
+      // Cargar SDK de forma dinámica (URL oficial recomendada por Supabase: crea window.supabase)
       await new Promise((resolve, reject) => {
         const script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/+esm';
-        script.type = 'module';
+        script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
         script.onload = resolve;
         script.onerror = reject;
         document.head.appendChild(script);
@@ -466,7 +465,7 @@ async function initSupabase(){
       
       // Esperar a que supabase esté disponible
       let retries = 0;
-      while(!window.supabase && retries < 20){
+      while(!window.supabase && retries < 30){
         await new Promise(r => setTimeout(r, 100));
         retries++;
       }
