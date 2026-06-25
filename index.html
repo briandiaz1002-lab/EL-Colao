@@ -8,6 +8,27 @@
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- ========== SUPABASE SDK ==========
+     Se carga como módulo ESM y se guarda en window.__supabaseCreateClient
+     (NO se usa el nombre global "supabase" para evitar conflictos con
+     extensiones del navegador o protecciones de privacidad como
+     "Tracking Prevention" de Edge, que pueden inyectar su propia
+     variable global con ese mismo nombre).
+     Si falla (sin internet, CDN caído, bloqueado): la app sigue
+     funcionando 100% offline. -->
+<script type="module">
+  (async () => {
+    try {
+      const mod = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+      window.__supabaseCreateClient = mod.createClient;
+    } catch(e) {
+      console.warn('⚠️ No se pudo cargar el SDK de Supabase:', e);
+    } finally {
+      window.__supabaseSdkChecked = true;
+    }
+  })();
+</script>
+<!-- ========== FIN SUPABASE SDK ========== -->
 <style>
   :root{
     --bg: #0B0E1A;
@@ -451,37 +472,21 @@ function hideFormModal(){
 async function initSupabase(){
   if(supabase) return; // Ya inicializado
   
-  // Si no hay SDK cargado, intentar cargar dinámicamente
-  if(!window.supabase){
-    try{
-      // Cargar SDK de forma dinámica (URL oficial recomendada por Supabase: crea window.supabase)
-      await new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
-        script.onload = resolve;
-        script.onerror = reject;
-        document.head.appendChild(script);
-      });
-      
-      // Esperar a que supabase esté disponible
-      let retries = 0;
-      while(!window.supabase && retries < 30){
-        await new Promise(r => setTimeout(r, 100));
-        retries++;
-      }
-      
-      if(!window.supabase){
-        throw new Error('Supabase SDK no cargó correctamente');
-      }
-    }catch(err){
-      console.warn('⚠️ No se pudo cargar SDK Supabase:', err);
-      console.log('Continuando en modo offline-only');
-      return;
-    }
+  // Esperar a que el módulo del <head> haya intentado cargar el SDK
+  // (máximo 5 segundos; si no hay internet, sigue offline)
+  let retries = 0;
+  while(!window.__supabaseSdkChecked && retries < 50){
+    await new Promise(r => setTimeout(r, 100));
+    retries++;
+  }
+  
+  if(!window.__supabaseCreateClient){
+    console.warn('⚠️ Supabase SDK no disponible (offline o CDN caído). Continuando en modo offline-only.');
+    return;
   }
   
   try{
-    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    supabase = window.__supabaseCreateClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     console.log('✅ Supabase inicializado');
     
     // Generar o recuperar deviceId
