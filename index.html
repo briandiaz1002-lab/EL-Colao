@@ -244,7 +244,7 @@
 <script>
 // ========== INICIO: CONFIGURACIÓN Y CONSTANTES ==========
 const DB_NAME = 'ElColaoDB';
-const DB_VERSION = 2; // Incrementado por nuevos stores
+const DB_VERSION = 3; // v3: ticketTypes ahora usa IDs de texto (no autoIncrement) para sincronizar con Supabase
 let db = null;
 let eventCfg = null; // cache del registro eventConfig
 let currentSection = 'compras';
@@ -279,13 +279,45 @@ function openDatabase(){
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e)=>{
       const _db = e.target.result;
+      const tx = e.target.transaction;
+      const oldVersion = e.oldVersion;
+
       if(!_db.objectStoreNames.contains('eventConfig')){
         _db.createObjectStore('eventConfig', { keyPath:'id' });
       }
-      if(!_db.objectStoreNames.contains('ticketTypes')){
-        const ts = _db.createObjectStore('ticketTypes', { keyPath:'id', autoIncrement:true });
+
+      // ========== MIGRACIÓN v3: ticketTypes de autoIncrement (número) a ID de texto ==========
+      // Motivo: con IDs numéricos autoIncrement, dos dispositivos distintos podrían
+      // generar el mismo ID (ej: ambos crean su "ticket #1"), y al sincronizar con
+      // Supabase uno sobrescribiría al otro por error. Usamos IDs de texto únicos
+      // (igual que ya hacemos con 'purchases') para que esto no pueda pasar.
+      if(_db.objectStoreNames.contains('ticketTypes') && oldVersion < 3){
+        const oldStore = tx.objectStore('ticketTypes');
+        const oldRecords = [];
+        oldStore.openCursor().onsuccess = (ev)=>{
+          const cursor = ev.target.result;
+          if(cursor){
+            oldRecords.push(cursor.value);
+            cursor.continue();
+          } else {
+            // Ya leímos todos los registros viejos: borrar y recrear el store
+            _db.deleteObjectStore('ticketTypes');
+            const ts = _db.createObjectStore('ticketTypes', { keyPath:'id' });
+            ts.createIndex('isActive', 'isActive', { unique:false });
+            const newStore = tx.objectStore('ticketTypes');
+            oldRecords.forEach((rec, idx)=>{
+              const newRec = { ...rec };
+              newRec.id = `ticket_${Date.now()}_${idx}_${Math.random().toString(36).substr(2,6)}`;
+              newStore.put(newRec);
+            });
+          }
+        };
+      } else if(!_db.objectStoreNames.contains('ticketTypes')){
+        const ts = _db.createObjectStore('ticketTypes', { keyPath:'id' });
         ts.createIndex('isActive', 'isActive', { unique:false });
       }
+      // ========== FIN MIGRACIÓN v3 ==========
+
       if(!_db.objectStoreNames.contains('purchases')){
         const ps = _db.createObjectStore('purchases', { keyPath:'id' });
         ps.createIndex('ci', 'ci', { unique:false });
@@ -499,6 +531,13 @@ async function initSupabase(){
     // Sincronizar cola al iniciar (si hay conexión)
     if(navigator.onLine){
       await processSyncQueue();
+      
+      // ========== DESCARGAR TODO LO QUE YA EXISTE EN SUPABASE ==========
+      // Sin esto, un dispositivo que se conecta por primera vez (o después
+      // de estar offline) nunca vería el evento, los tickets ni las compras
+      // ya registradas por otros dispositivos.
+      await pullRemoteData();
+      // ========== FIN DESCARGA INICIAL ==========
     }
   }catch(err){
     console.error('❌ Error inicializando Supabase:', err);
@@ -506,7 +545,140 @@ async function initSupabase(){
   }
 }
 
+// Descarga todo lo que ya existe en Supabase para este evento
+// (configuración del evento, tipos de ticket y compras) y lo fusiona
+// con la base de datos local. Se ejecuta al conectar y al reconectar,
+// para que el dispositivo "se ponga al día". Después, Realtime mantiene
+// todo sincronizado en vivo sin necesidad de repetir esto.
+async function pullRemoteData(){
+  if(!supabase) return;
+  
+  try{
+    // 1. Configuración del evento
+    const { data: eventRow, error: eventErr } = await supabase
+      .from('events')
+      .select('*')
+      .eq('id', SUPABASE_EVENT_ID)
+      .maybeSingle();
+    
+    if(!eventErr && eventRow){
+      const localCfg = await getById('eventConfig', 1);
+      if(!localCfg || !localCfg.setupCompleted){
+        // Este dispositivo nunca completó el asistente: lo configuramos
+        // automáticamente con lo que ya existe en Supabase, así no hay
+        // que repetir el wizard en cada dispositivo nuevo.
+        eventCfg = {
+          id: 1,
+          eventName: eventRow.name,
+          currencySymbol: eventRow.currencySymbol || '$',
+          setupCompleted: true,
+          createdAt: localCfg?.createdAt || Date.now()
+        };
+        await putRecord('eventConfig', eventCfg);
+        console.log('✅ Configuración del evento descargada desde Supabase');
+      }
+    }
+    
+    // 2. Tipos de ticket
+    const { data: remoteTickets, error: ticketsErr } = await supabase
+      .from('ticketTypes')
+      .select('*')
+      .eq('eventId', SUPABASE_EVENT_ID);
+    
+    if(!ticketsErr && remoteTickets && remoteTickets.length){
+      for(const rt of remoteTickets){
+        await putRecord('ticketTypes', {
+          id: rt.id,
+          name: rt.name,
+          category: rt.name,
+          price: rt.price,
+          isActive: rt.isActive,
+          createdAt: rt.createdAt
+        });
+      }
+      console.log(`✅ ${remoteTickets.length} tipo(s) de ticket descargado(s)`);
+    }
+    
+    // 3. Compras
+    await pullRemotePurchases();
+    
+  }catch(err){
+    console.warn('⚠️ No se pudo descargar datos remotos:', err);
+  }
+}
+
+// Descargar todas las compras existentes del evento desde Supabase
+// y fusionarlas con la base de datos local (IndexedDB).
+async function pullRemotePurchases(){
+  if(!supabase) return;
+  
+  try{
+    console.log('⬇️ Descargando compras existentes del evento...');
+    
+    const { data, error } = await supabase
+      .from('purchases')
+      .select('*')
+      .eq('eventId', SUPABASE_EVENT_ID);
+    
+    if(error) throw error;
+    
+    if(data && data.length){
+      for(const remoteRecord of data){
+        await putRecord('purchases', remoteRecord);
+      }
+      console.log(`✅ ${data.length} compra(s) descargada(s) y fusionada(s) localmente`);
+    } else {
+      console.log('ℹ️ No hay compras remotas todavía para este evento');
+    }
+  }catch(err){
+    console.warn('⚠️ No se pudo descargar el historial remoto de compras:', err);
+  }
+}
+
 // Inicializar o recuperar deviceId único de este dispositivo
+
+// Sube TODO lo que ya existe localmente (evento, tickets, compras) a Supabase.
+// Pensada para dispositivos que ya tenían datos guardados ANTES de activar
+// la sincronización — los pone al día encolándolos para subir, sin duplicar
+// nada (porque siempre se hace "upsert" por id, nunca "insert" ciego).
+// Acción manual, disponible en Backup → "Subir todo lo existente a Supabase".
+async function pushAllLocalDataToSupabase(){
+  const result = { eventConfig: false, ticketTypes: 0, purchases: 0 };
+  
+  // 1. Configuración del evento
+  const localCfg = await getById('eventConfig', 1);
+  if(localCfg && localCfg.setupCompleted){
+    await enqueueSyncChange('UPDATE', 'eventConfig', localCfg, false);
+    result.eventConfig = true;
+  }
+  
+  // 2. Tipos de ticket
+  const localTickets = await getAll('ticketTypes');
+  for(const t of localTickets){
+    await enqueueSyncChange('UPDATE', 'ticketTypes', t, false);
+    result.ticketTypes++;
+  }
+  
+  // 3. Compras
+  const localPurchases = await getAll('purchases');
+  for(const p of localPurchases){
+    // Asegurar que tenga eventId y deviceId antes de subir
+    // (compras creadas en versiones viejas, antes de Supabase, no los tenían)
+    p.eventId = p.eventId || SUPABASE_EVENT_ID;
+    p.deviceId = p.deviceId || currentDeviceId;
+    p.updatedAt = p.updatedAt || Date.now();
+    await putRecord('purchases', p); // guardar localmente los campos completados
+    await enqueueSyncChange('UPDATE', 'purchases', p, false);
+    result.purchases++;
+  }
+  
+  // Procesar TODA la cola de una sola vez, ahora que ya está completa
+  await processSyncQueue();
+  
+  console.log('☁️ Migración inicial encolada:', result);
+  return result;
+}
+
 async function initDeviceId(){
   let deviceInfo = await getById('deviceInfo', 1);
   if(!deviceInfo){
@@ -530,6 +702,11 @@ async function onOnline(){
   // Intentar sincronizar cola
   await processSyncQueue();
   
+  // Descargar cambios que ocurrieron mientras estábamos offline
+  // (Realtime solo avisa de cambios NUEVOS desde que nos suscribimos;
+  // lo que pasó durante la desconexión hay que pedirlo explícitamente)
+  await pullRemoteData();
+  
   // Recargar datos de Supabase
   if(currentSection === 'compras'){
     purchasesCurrentPage = 1;
@@ -547,7 +724,45 @@ function onOffline(){
 }
 
 // Agregar cambio a la cola de sincronización
-async function enqueueSyncChange(action, store, record){
+// Mapa: store local (IndexedDB) → tabla remota (Supabase)
+const REMOTE_TABLE_MAP = {
+  purchases: 'purchases',
+  ticketTypes: 'ticketTypes',
+  eventConfig: 'events'
+};
+
+// Transforma un registro local al formato exacto que espera la tabla remota.
+// Necesario porque 'eventConfig' y 'ticketTypes' tienen nombres de campo
+// distintos localmente que en Supabase (ej: eventName → name).
+function buildRemotePayload(store, record){
+  if(store === 'purchases'){
+    return record; // ya tiene el formato correcto (eventId, buyerName, etc.)
+  }
+  if(store === 'ticketTypes'){
+    return {
+      id: record.id,
+      eventId: SUPABASE_EVENT_ID,
+      name: record.name,
+      price: record.price,
+      isActive: record.isActive,
+      createdAt: record.createdAt,
+      updatedAt: Date.now()
+    };
+  }
+  if(store === 'eventConfig'){
+    // El "id" local (siempre 1) es solo una clave interna de IndexedDB.
+    // En Supabase, el evento real vive bajo SUPABASE_EVENT_ID — usamos
+    // siempre ese id al sincronizar, nunca el id local.
+    return {
+      id: SUPABASE_EVENT_ID,
+      name: record.eventName,
+      currencySymbol: record.currencySymbol
+    };
+  }
+  return record;
+}
+
+async function enqueueSyncChange(action, store, record, autoProcess = true){
   if(!record.id){
     console.error('Record sin ID, no se puede sincronizar:', record);
     return;
@@ -568,7 +783,9 @@ async function enqueueSyncChange(action, store, record){
   console.log('📌 Cambio encolado:', action, store, record.id);
   
   // Intentar enviar inmediatamente si hay conexión
-  if(navigator.onLine){
+  // (autoProcess=false se usa para encolados masivos, donde es mejor
+  // procesar la cola completa UNA vez al final, no en cada elemento)
+  if(autoProcess && navigator.onLine){
     await processSyncQueue();
   }
 }
@@ -587,16 +804,19 @@ async function processSyncQueue(){
   
   for(const item of pending){
     try{
+      const table = REMOTE_TABLE_MAP[item.store] || item.store;
+      
       if(item.action === 'INSERT' || item.action === 'UPDATE'){
+        const payload = buildRemotePayload(item.store, item.record);
         // Enviar a Supabase (upsert = insert o update automáticamente)
         const { error } = await supabase
-          .from('purchases')
-          .upsert(item.record, { onConflict: 'id' });
+          .from(table)
+          .upsert(payload, { onConflict: 'id' });
         
         if(error) throw error;
       } else if(item.action === 'DELETE'){
         const { error } = await supabase
-          .from('purchases')
+          .from(table)
           .delete()
           .eq('id', item.recordId);
         
@@ -801,22 +1021,25 @@ function renderTicketTypesList(ticketTypes){
 
   wrap.querySelectorAll('[data-edit-ticket]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
-      const t = await getById('ticketTypes', Number(btn.dataset.editTicket));
+      const t = await getById('ticketTypes', btn.dataset.editTicket);
       openTicketTypeForm(t);
     });
   });
   wrap.querySelectorAll('[data-toggle-ticket]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
-      const t = await getById('ticketTypes', Number(btn.dataset.toggleTicket));
+      const t = await getById('ticketTypes', btn.dataset.toggleTicket);
       t.isActive = !t.isActive;
       await putRecord('ticketTypes', t);
+      // ========== SINCRONIZAR CON SUPABASE ==========
+      await enqueueSyncChange('UPDATE', 'ticketTypes', t);
+      // ========== FIN SINCRONIZACIÓN ==========
       showToast(`${t.name} ${t.isActive ? 'activado' : 'desactivado'}`, 'success');
       renderAjustes();
     });
   });
   wrap.querySelectorAll('[data-delete-ticket]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
-      const id = Number(btn.dataset.deleteTicket);
+      const id = btn.dataset.deleteTicket;
       const usedInPurchases = await isTicketTypeUsed(id);
       if(usedInPurchases){
         await appAlert('Este tipo de ticket ya se usó en ventas registradas. Desactívalo en vez de eliminarlo, así conservas el histórico correcto.', 'warning', 'No se puede eliminar');
@@ -825,6 +1048,9 @@ function renderTicketTypesList(ticketTypes){
       const ok = await appConfirm('Esta acción no se puede deshacer. ¿Eliminar este tipo de ticket?', 'error', 'Eliminar tipo de ticket', 'Eliminar', 'Cancelar', 'danger');
       if(!ok) return;
       await deleteRecord('ticketTypes', id);
+      // ========== SINCRONIZAR CON SUPABASE ==========
+      await enqueueSyncChange('DELETE', 'ticketTypes', { id });
+      // ========== FIN SINCRONIZACIÓN ==========
       showToast('Tipo de ticket eliminado', 'success');
       renderAjustes();
     });
@@ -855,11 +1081,18 @@ function openTicketTypeForm(existing){
     const price = roundMoney(document.getElementById('ftPrice').value);
     if(!category){ await appAlert('La categoría del tipo de ticket es obligatoria.'); return; }
     if(!price || price < 1){ await appAlert('El precio debe ser un valor positivo.'); return; }
-    const record = isEdit ? { ...existing } : { isActive:true, createdAt: Date.now() };
+    const record = isEdit ? { ...existing } : { 
+      id: `ticket_${Date.now()}_${Math.random().toString(36).substr(2,9)}`,
+      isActive:true, 
+      createdAt: Date.now() 
+    };
     record.name = category;
     record.category = category;
     record.price = price;
     await putRecord('ticketTypes', record);
+    // ========== SINCRONIZAR CON SUPABASE ==========
+    await enqueueSyncChange(isEdit ? 'UPDATE' : 'INSERT', 'ticketTypes', record);
+    // ========== FIN SINCRONIZACIÓN ==========
     hideFormModal();
     showToast(`Tipo de ticket ${isEdit?'actualizado':'creado'}`, 'success');
     renderAjustes();
@@ -873,6 +1106,9 @@ async function saveEventConfigFromAjustes(){
   eventCfg.eventName = name;
   eventCfg.currencySymbol = currency || '$';
   await putRecord('eventConfig', eventCfg);
+  // ========== SINCRONIZAR CON SUPABASE ==========
+  await enqueueSyncChange('UPDATE', 'eventConfig', eventCfg);
+  // ========== FIN SINCRONIZACIÓN ==========
   renderSidebar();
   showToast('Configuración del evento actualizada', 'success');
 }
@@ -1800,7 +2036,37 @@ async function renderBackup(){
       <input type="file" id="mergeJsonFile" accept="application/json,.json" class="mb-3">
       <button id="btnMergeJson" class="btn btn-accent w-full">🔀 Iniciar fusión inteligente</button>
     </div>
+
+    <div class="ticket-stub p-5 border-l-4 mt-5" style="border-color:var(--success);">
+      <h2 class="font-display text-lg mb-2" style="color:var(--success);">☁️ SUBIR DATOS EXISTENTES A LA NUBE</h2>
+      <p class="text-sm text-[var(--text-dim)] mb-4">
+        Usa esto <strong>una sola vez</strong> si este dispositivo ya tenía compras, tickets o
+        configuración guardados <strong>antes</strong> de activar la sincronización con Supabase.
+        Sube todo lo que ya existe localmente a la nube, para que otros dispositivos también
+        puedan verlo. Es seguro repetirlo: no duplica nada.
+      </p>
+      <button id="btnPushExisting" class="btn w-full" style="background:var(--success); color:#0B0E1A;">📤 Subir todo lo existente a Supabase</button>
+    </div>
   `;
+
+  document.getElementById('btnPushExisting').addEventListener('click', async ()=>{
+    if(!supabase){
+      await appAlert('No hay conexión con Supabase en este momento. Conéctate a internet e inténtalo de nuevo.', 'warning', 'Sin conexión');
+      return;
+    }
+    const ok = await appConfirm(
+      'Esto va a encolar TODAS las compras, tickets y configuración que ya tienes guardados localmente, para subirlos a Supabase. No borra ni duplica nada. ¿Continuar?',
+      'warning', 'Subir datos existentes', 'Sí, subir todo', 'Cancelar'
+    );
+    if(!ok) return;
+    
+    const result = await pushAllLocalDataToSupabase();
+    showToast(
+      `Evento: ${result.eventConfig ? '✓' : '—'} · Tickets: ${result.ticketTypes} · Compras: ${result.purchases}`,
+      'success',
+      '☁️ Migración encolada'
+    );
+  });
 
   document.getElementById('btnBackupJson').addEventListener('click', async ()=>{
     const filename = await BackupService.download('backup');
@@ -2084,15 +2350,23 @@ function initWizard(){
       createdAt: Date.now()
     };
     await putRecord('eventConfig', eventCfg);
+    // ========== SINCRONIZAR EVENTO CON SUPABASE ==========
+    await enqueueSyncChange('UPDATE', 'eventConfig', eventCfg);
+    // ========== FIN SINCRONIZACIÓN ==========
 
     for(const t of wizardTicketDraft){
-      await putRecord('ticketTypes', {
+      const ticketRecord = {
+        id: `ticket_${Date.now()}_${Math.random().toString(36).substr(2,9)}`,
         name: t.category.trim(),
         category: t.category.trim(),
         price: roundMoney(t.price),
         isActive: true,
         createdAt: Date.now()
-      });
+      };
+      await putRecord('ticketTypes', ticketRecord);
+      // ========== SINCRONIZAR TICKET CON SUPABASE ==========
+      await enqueueSyncChange('INSERT', 'ticketTypes', ticketRecord);
+      // ========== FIN SINCRONIZACIÓN ==========
     }
 
     document.getElementById('wizardOverlay').classList.add('hidden');
@@ -2112,8 +2386,12 @@ async function init(){
   document.getElementById('mobileMenuBtn').addEventListener('click', openMobileNav);
   document.getElementById('mobileMenuClose').addEventListener('click', closeMobileNav);
 
-  // ========== NUEVO: INICIALIZAR SUPABASE ==========
+  // ========== INICIALIZAR SUPABASE Y DESCARGAR DATOS EXISTENTES ==========
   await initSupabase();
+  // Si initSupabase() descargó configuración/tickets de otro dispositivo,
+  // hay que releer eventCfg local para reflejar ese cambio antes de decidir
+  // si mostrar el asistente de bienvenida.
+  await loadEventConfig();
   // ========== FIN INICIALIZACIÓN SUPABASE ==========
 
   if(!eventCfg.setupCompleted){
