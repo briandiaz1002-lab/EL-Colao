@@ -1169,7 +1169,10 @@ async function renderCompras(){
   main.innerHTML = `
     <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-6">
       <h1 class="font-display text-3xl">COMPRAS</h1>
-      <button id="btnNewPurchase" class="btn btn-accent">+ Nueva compra</button>
+      <div class="flex flex-col sm:flex-row gap-2">
+        <button id="btnNewPurchase" class="btn btn-accent">+ Nueva compra</button>
+        <button id="btnDirectSale" class="btn btn-ghost">🎟️ Venta directa</button>
+      </div>
     </div>
     <div id="purchaseQuickKpis" class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-5"></div>
     <div class="flex flex-col md:flex-row gap-3 mb-5">
@@ -1185,6 +1188,7 @@ async function renderCompras(){
     <div id="purchasesList" class="space-y-3"></div>
   `;
   document.getElementById('btnNewPurchase').addEventListener('click', ()=> openPurchaseForm(null));
+  document.getElementById('btnDirectSale').addEventListener('click', ()=> openPurchaseForm(null, true));
   document.getElementById('purchaseSearch').addEventListener('input', renderPurchasesList);
   document.getElementById('purchaseStatusFilter').addEventListener('change', renderPurchasesList);
   await renderPurchasesList();
@@ -1358,7 +1362,7 @@ async function openPurchaseDetail(p){
   });
 }
 
-async function openPurchaseForm(existing){
+async function openPurchaseForm(existing, directSale=false){
   const ticketTypes = (await getAll('ticketTypes')).filter(t=>t.isActive).sort((a,b)=> a.id-b.id);
   if(!ticketTypes.length){
     await appAlert('No hay tipos de ticket activos. Crea al menos uno desde Ajustes antes de registrar una compra.', 'warning', 'Sin tipos de ticket');
@@ -1382,7 +1386,8 @@ async function openPurchaseForm(existing){
   `).join('');
 
   showFormModal(`
-    <h3 class="font-display text-xl mb-4">${isEdit?'EDITAR':'NUEVA'} COMPRA</h3>
+    <h3 class="font-display text-xl mb-4">${isEdit ? 'EDITAR COMPRA' : (directSale ? '🎟️ VENTA DIRECTA' : 'NUEVA COMPRA')}</h3>
+    ${directSale ? '<p class="text-xs text-[var(--accent)] mb-4 -mt-3">La venta se registra directamente como "dentro de la fiesta".</p>' : ''}
 
     <label class="text-xs text-[var(--text-dim)] block mb-1">Tickets</label>
     <div id="cartRows" class="space-y-2 mb-2 max-h-56 overflow-y-auto scrollbar-thin pr-1">${rowsHtml}</div>
@@ -1411,7 +1416,7 @@ async function openPurchaseForm(existing){
 
     <div class="flex justify-end gap-2 mt-5">
       <button class="btn btn-ghost" id="pCancelBtn">Cancelar</button>
-      <button class="btn btn-accent" id="pSaveBtn">${isEdit?'Guardar cambios':'Registrar compra'}</button>
+      <button class="btn btn-accent" id="pSaveBtn">${isEdit ? 'Guardar cambios' : (directSale ? 'Cobrar y dar entrada' : 'Registrar compra')}</button>
     </div>
   `, 'max-w-lg');
 
@@ -1461,15 +1466,17 @@ async function openPurchaseForm(existing){
     const totalAmount = roundMoney(items.reduce((s,it)=> s+(it.qty*it.price), 0));
 
     // ========== NUEVO: GENERAR ID ÚNICO Y VINCULAR A EVENTO ==========
+    const now = Date.now();
     const record = isEdit
       ? { ...existing }
-      : { 
-          id: `purchase_${Date.now()}_${Math.random().toString(36).substr(2,9)}`,
+      : {
+          id: `purchase_${now}_${Math.random().toString(36).substr(2,9)}`,
           eventId: SUPABASE_EVENT_ID,  // NUEVO: vincular al evento
-          status:'pending', 
-          enteredCount:0, 
-          enteredAt:null, 
-          createdAt: Date.now() 
+          status: directSale ? 'complete' : 'pending',
+          enteredCount: directSale ? totalQuantity : 0,
+          enteredAt: directSale ? now : null,
+          lastEntryAt: directSale ? now : null,
+          createdAt: now
         };
     // ========== FIN GENERACIÓN ID ==========
 
@@ -1498,7 +1505,7 @@ async function openPurchaseForm(existing){
     // ========== FIN SINCRONIZACIÓN ==========
     
     hideFormModal();
-    showToast(`Compra ${isEdit?'actualizada':'registrada'} · ${totalQuantity} ticket(s)`, 'success');
+    showToast(`Compra ${isEdit?'actualizada':(directSale?'cobrada y dentro':'registrada')} · ${totalQuantity} ticket(s)`, 'success');
     renderPurchasesList();
   });
 }
@@ -2329,7 +2336,7 @@ function initWizard(){
     const valid = wizardTicketDraft.filter(t=> t.category.trim().length > 0);
     if(!valid.length){ await appAlert('Agrega al menos una categoría de ticket.'); return; }
     for(const t of valid){
-      if(t.price < 0){ await appAlert(`El precio de "${t.category}" no puede ser negativo.`); return; }
+      if(!t.price || t.price <= 0){ await appAlert(`El precio de "${t.category}" debe ser un valor mayor que cero.`); return; }
     }
     wizardTicketDraft = valid;
     renderWizSummary();
